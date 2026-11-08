@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "scripts": {
+    "build:onedrive-auth": "esbuild web/src/onedrive_auth.js --bundle --format=iife --outfile=web/onedrive_auth.bundle.js && esbuild web/src/redirect_bridge.js --bundle --format=iife --outfile=web/redirect_bridge.bundle.js",
+    "build": "npm run build:onedrive-auth"
+  },
+  "devDependencies": {
+    "@azure/msal-browser": "^5.29.0",
+    "esbuild": "^0.27.0"
+  }
+}

@@ -1,11 +1,11 @@
 {
-    "name": "chordhub",
-    "short_name": "chordhub",
+    "name": "ChordHub",
+    "short_name": "ChordHub",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#111317",
+    "theme_color": "#FF9F00",
+    "description": "Piesne s akordami vo formate ChordPro.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [

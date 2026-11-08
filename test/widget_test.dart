@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:chordhub/main.dart';
+import 'package:chordhub/app.dart';
 
 void main() {
   testWidgets('ChordHub renders initial screen', (WidgetTester tester) async {
