@@ -15,6 +15,7 @@ class SongPerformancePage extends StatefulWidget {
     required this.displayLines,
     required this.initialTransposeSemitones,
     required this.initialScrollSpeedPixelsPerSecond,
+    this.onSaveScrollSpeed,
     super.key,
   });
 
@@ -23,6 +24,9 @@ class SongPerformancePage extends StatefulWidget {
   final List<SongDisplayLine> displayLines;
   final int initialTransposeSemitones;
   final double initialScrollSpeedPixelsPerSecond;
+
+  /// Uloží aktuálnu rýchlosť scrollovania do piesne. Pri chybe má vyhodiť výnimku.
+  final Future<void> Function(double speedPixelsPerSecond)? onSaveScrollSpeed;
 
   @override
   State<SongPerformancePage> createState() => _SongPerformancePageState();
@@ -69,6 +73,29 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
         120,
       );
     });
+  }
+
+  Future<void> _saveScrollSpeed() async {
+    final save = widget.onSaveScrollSpeed;
+    if (save == null) {
+      return;
+    }
+
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await save(_scrollSpeedPixelsPerSecond);
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(
+            'Rýchlosť ${_scrollSpeedPixelsPerSecond.round()} px/s bola uložená do piesne.',
+          ),
+        ),
+      );
+    } catch (error) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Nepodarilo sa uložiť rýchlosť: $error')),
+      );
+    }
   }
 
   void _toggleAutoScroll() {
@@ -243,6 +270,12 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
             onPressed: () => _changeScrollSpeedBy(4),
             tooltip: 'Zrýchliť scrollovanie',
             icon: const Icon(Icons.add_circle_outline),
+          ),
+          IconButton(
+            onPressed:
+                widget.onSaveScrollSpeed == null ? null : _saveScrollSpeed,
+            tooltip: 'Uložiť rýchlosť scrollovania do piesne',
+            icon: const Icon(Icons.save_outlined),
           ),
           IconButton(
             onPressed: _toggleAutoScroll,

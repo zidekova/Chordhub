@@ -54,6 +54,12 @@ class _SongbookPageState extends State<SongbookPage> {
   final ScrollController _previewScrollController = ScrollController();
   final ScrollController _playlistHorizontalScrollController =
       ScrollController();
+  final TextEditingController _songSearchController = TextEditingController();
+  final FocusNode _songSearchFocusNode = FocusNode();
+  // Dopyt je v ValueNotifier, aby písanie neprekresľovalo celú stránku
+  // (detail piesne sa pri každom setState znovu parsuje).
+  final ValueNotifier<String> _songSearchQuery = ValueNotifier<String>('');
+  final Map<String, _SongSearchEntry> _songSearchIndex = {};
 
   final Set<String> _selectedForCopy =
       {}; // paths selected for copy to subfolder
@@ -87,6 +93,9 @@ class _SongbookPageState extends State<SongbookPage> {
   void dispose() {
     _editorController.dispose();
     _hotkeysFocusNode.dispose();
+    _songSearchController.dispose();
+    _songSearchQuery.dispose();
+    _songSearchFocusNode.dispose();
     _previewScrollController.dispose();
     _playlistHorizontalScrollController.dispose();
     super.dispose();
@@ -969,12 +978,21 @@ class _SongbookPageState extends State<SongbookPage> {
     );
   }
 
+  bool _isTextInputFocused() {
+    final context = FocusManager.instance.primaryFocus?.context;
+    if (context == null) return false;
+    return context.widget is EditableText ||
+        context.findAncestorWidgetOfExactType<EditableText>() != null;
+  }
+
   void _requestHotkeysFocus() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
       }
-      if (!_hotkeysFocusNode.hasFocus) {
+      // hasFocus je true aj keď má focus potomok (napr. vyhľadávacie pole),
+      // preto sa kontroluje priamo primárny focus.
+      if (FocusManager.instance.primaryFocus != _hotkeysFocusNode) {
         _hotkeysFocusNode.requestFocus();
       }
     });
@@ -1735,9 +1753,64 @@ class _SongbookPageState extends State<SongbookPage> {
               displayLines: displayLines,
               initialTransposeSemitones: _transposeSemitones,
               initialScrollSpeedPixelsPerSecond: parsedSong.scrollSpeed,
+              onSaveScrollSpeed: _saveScrollSpeedToSong,
             ),
       ),
     );
+  }
+
+  /// Zapíše {scrollspeed: N} do aktuálne vybranej piesne (existujúci flag prepíše).
+  Future<void> _saveScrollSpeedToSong(double speed) async {
+    final selectedSong = _selectedSong;
+    if (selectedSong == null) {
+      throw StateError('Nie je vybraná žiadna pieseň.');
+    }
+
+    final newContent = _withScrollSpeedDirective(
+      selectedSong.content,
+      speed.round(),
+    );
+    if (kIsWeb) {
+      await OneDriveRepository.instance.saveSong(selectedSong.path, newContent);
+    } else {
+      await SongRepository.saveSong(selectedSong.path, newContent);
+    }
+
+    if (!mounted) return;
+    setState(() {
+      selectedSong.content = newContent;
+      if (!_isEditing) {
+        _editorController.text = newContent;
+      }
+    });
+  }
+
+  static String _withScrollSpeedDirective(String content, int speed) {
+    final newline = content.contains('\r\n') ? '\r\n' : '\n';
+    final directive = '{scrollspeed: $speed}';
+    final lines = content.split(RegExp(r'\r?\n'));
+
+    final existing = RegExp(
+      r'^\s*\{\s*scroll[_-]?speed\s*:.*\}\s*$',
+      caseSensitive: false,
+    );
+    final existingIndex = lines.indexWhere(existing.hasMatch);
+    if (existingIndex >= 0) {
+      lines[existingIndex] = directive;
+      return lines.join(newline);
+    }
+
+    // Nový flag sa vloží za posledný title/subtitle riadok, inak na začiatok.
+    final header = RegExp(
+      r'^\s*\{\s*(title|subtitle|t|st)\s*:',
+      caseSensitive: false,
+    );
+    var insertAt = 0;
+    for (var i = 0; i < lines.length; i++) {
+      if (header.hasMatch(lines[i])) insertAt = i + 1;
+    }
+    lines.insert(insertAt, directive);
+    return lines.join(newline);
   }
 
   Future<void> _openSelectedSongPerformanceMode() {
@@ -1765,6 +1838,12 @@ class _SongbookPageState extends State<SongbookPage> {
       autofocus: true,
       onKeyEvent: (node, event) {
         if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+          return KeyEventResult.ignored;
+        }
+
+        // Pri písaní do ľubovoľného textového poľa (hľadanie, editor) nesmú
+        // šípky/medzerník/backspace spúšťať skratky.
+        if (_songSearchFocusNode.hasFocus || _isTextInputFocused()) {
           return KeyEventResult.ignored;
         }
 
@@ -2434,38 +2513,152 @@ class _SongbookPageState extends State<SongbookPage> {
   }
 
   Widget _buildSongListPanel() {
-    return Focus(
-      canRequestFocus: false,
-      skipTraversal: true,
-      descendantsAreFocusable: false,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(12),
-            color: Theme.of(context).colorScheme.surfaceContainerHighest,
-            child: Text(
-              _folderPath!,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Container(
+          padding: const EdgeInsets.all(12),
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          child: Text(
+            _folderPath!,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: Theme.of(context).textTheme.bodySmall,
           ),
-          if (_songs.isEmpty)
-            const Expanded(
-              child: Center(
-                child: Text('V tomto priečinku nie sú žiadne .pro súbory.'),
+        ),
+        if (_songs.isNotEmpty) _buildSongSearchField(),
+        Expanded(
+          // Zoznam skladieb zostáva nefocusovateľný (kvôli klávesovým skratkám),
+          // vyhľadávacie pole je preto mimo tohto Focus widgetu.
+          child: Focus(
+            canRequestFocus: false,
+            skipTraversal: true,
+            descendantsAreFocusable: false,
+            child:
+                _songs.isEmpty
+                    ? const Center(
+                      child: Text(
+                        'V tomto priečinku nie sú žiadne .pro súbory.',
+                      ),
+                    )
+                    : ValueListenableBuilder<String>(
+                      valueListenable: _songSearchQuery,
+                      builder:
+                          (context, query, _) => _buildGroupedSongList(query),
+                    ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSongSearchField() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: ValueListenableBuilder<String>(
+        valueListenable: _songSearchQuery,
+        builder:
+            (context, query, _) => TextField(
+              controller: _songSearchController,
+              focusNode: _songSearchFocusNode,
+              onChanged: (value) => _songSearchQuery.value = value,
+              onSubmitted: (_) {
+                _songSearchFocusNode.unfocus();
+                _requestHotkeysFocus();
+              },
+              onTapOutside: (_) {
+                if (_songSearchFocusNode.hasFocus) {
+                  _songSearchFocusNode.unfocus();
+                  _requestHotkeysFocus();
+                }
+              },
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: 'Hľadať v aktuálnom priečinku',
+                prefixIcon: const Icon(Icons.search),
+                suffixIcon:
+                    query.isNotEmpty
+                        ? IconButton(
+                          tooltip: 'Vymazať hľadanie',
+                          icon: const Icon(Icons.clear),
+                          onPressed: () {
+                            _songSearchController.clear();
+                            _songSearchQuery.value = '';
+                          },
+                        )
+                        : null,
+                border: const OutlineInputBorder(),
               ),
-            )
-          else
-            Expanded(child: _buildGroupedSongList()),
-        ],
+            ),
       ),
     );
   }
 
-  Widget _buildGroupedSongList() {
-    final folderPath = _folderPath ?? '';
+  /// Relatívny priečinok skladby voči koreňovému priečinku ('' = hlavný).
+  String _relativeDirOf(String songPath) {
+    var rel = songPath.replaceAll('\\', '/');
+    final base = (_folderPath ?? '').replaceAll('\\', '/');
+    if (base.isNotEmpty && rel.startsWith(base)) {
+      rel = rel.substring(base.length).trimLeft();
+      if (rel.startsWith('/')) rel = rel.substring(1);
+    }
+    final lastSlash = rel.lastIndexOf('/');
+    return lastSlash <= 0 ? '' : rel.substring(0, lastSlash);
+  }
+
+  /// Aktuálny priečinok = priečinok práve vybranej skladby (inak hlavný).
+  String get _currentRelativeDir {
+    final selected = _selectedSong;
+    return selected == null ? '' : _relativeDirOf(selected.path);
+  }
+
+  /// Malé písmená, bez diakritiky a bez ChordPro akordov/direktív.
+  static String _normalizeForSearch(
+    String input, {
+    bool stripChordPro = false,
+  }) {
+    var text = input;
+    if (stripChordPro) {
+      text = text.replaceAll(RegExp(r'\[[^\]]*\]|\{[^}]*\}'), '');
+    }
+    const from = 'áäčďéěíĺľňóôöŕřšťúůüýž';
+    const to = 'aacdeeillnooorrstuuuyz';
+    final buffer = StringBuffer();
+    for (final rune in text.toLowerCase().runes) {
+      final ch = String.fromCharCode(rune);
+      final idx = from.indexOf(ch);
+      buffer.write(idx >= 0 ? to[idx] : ch);
+    }
+    return buffer.toString();
+  }
+
+  bool _songMatchesQuery(ProSongFile song, String normalizedQuery) {
+    final words = normalizedQuery
+        .split(RegExp(r'\s+'))
+        .where((w) => w.isNotEmpty);
+    final entry = _searchEntryFor(song);
+    // Každé zadané slovo sa musí nachádzať v názve alebo v interpretovi (podnadpise).
+    return words.every((w) => entry.haystack.contains(w));
+  }
+
+  /// Normalizovaný názov a interpret sa počíta len raz (a znovu až po zmene).
+  _SongSearchEntry _searchEntryFor(ProSongFile song) {
+    final cached = _songSearchIndex[song.path];
+    if (cached != null &&
+        cached.title == song.title &&
+        cached.subtitle == song.subtitle) {
+      return cached;
+    }
+    final entry = _SongSearchEntry(
+      title: song.title,
+      subtitle: song.subtitle,
+      haystack: _normalizeForSearch('${song.title} ${song.subtitle ?? ''}'),
+    );
+    _songSearchIndex[song.path] = entry;
+    return entry;
+  }
+
+  Widget _buildGroupedSongList(String query) {
     // group by relative directory under selected folder
     final groups = <String, List<ProSongFile>>{};
 
@@ -2474,20 +2667,7 @@ class _SongbookPageState extends State<SongbookPage> {
     }
 
     for (final song in _songs) {
-      var rel = song.path.replaceAll('\\', '/');
-      var base = folderPath.replaceAll('\\', '/');
-      if (base.isNotEmpty && rel.startsWith(base)) {
-        rel = rel.substring(base.length).trimLeft();
-        if (rel.startsWith('/')) rel = rel.substring(1);
-      }
-      final lastSlash = rel.lastIndexOf('/');
-      String dir;
-      if (lastSlash <= 0) {
-        dir = '';
-      } else {
-        dir = rel.substring(0, lastSlash);
-      }
-      groups.putIfAbsent(dir, () => []).add(song);
+      groups.putIfAbsent(_relativeDirOf(song.path), () => []).add(song);
     }
 
     final sortedKeys =
@@ -2496,6 +2676,33 @@ class _SongbookPageState extends State<SongbookPage> {
 
     for (final key in sortedKeys) {
       _applyCustomOrder(key, groups[key]!);
+    }
+
+    final normalizedQuery = _normalizeForSearch(query.trim());
+    if (normalizedQuery.isNotEmpty) {
+      // Hľadanie: zobrazí sa len aktuálny priečinok a v ňom zhodné skladby.
+      final currentDir = _currentRelativeDir;
+      final folderSongs = groups[currentDir] ?? <ProSongFile>[];
+      final matches =
+          folderSongs
+              .where((song) => _songMatchesQuery(song, normalizedQuery))
+              .toList();
+      return ListView(
+        children: [
+          _buildFolderSection(
+            currentDir,
+            currentDir.isEmpty ? '(Hlavný priečinok)' : currentDir,
+            folderSongs,
+            visibleSongs: matches,
+            isFiltering: true,
+          ),
+          if (matches.isEmpty)
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('Nič sa nenašlo.'),
+            ),
+        ],
+      );
     }
 
     return ListView(
@@ -2512,14 +2719,21 @@ class _SongbookPageState extends State<SongbookPage> {
   Widget _buildFolderSection(
     String relativeDir,
     String title,
-    List<ProSongFile> songs,
-  ) {
+    List<ProSongFile> songs, {
+    List<ProSongFile>? visibleSongs,
+    bool isFiltering = false,
+  }) {
     final isMainFolder = relativeDir.isEmpty;
-    final canReorder = !isMainFolder && !_isSelectionMode;
+    // Pri filtrovaní sa preusporadúvanie vypína (indexy by nesedeli).
+    final canReorder = !isMainFolder && !_isSelectionMode && !isFiltering;
     final canBuildPlaylist = songs.isNotEmpty;
+    final shownSongs = visibleSongs ?? songs;
 
     return ExpansionTile(
-      initiallyExpanded: isMainFolder,
+      key: ValueKey(
+        isFiltering ? 'search_folder_$relativeDir' : 'folder_$relativeDir',
+      ),
+      initiallyExpanded: isMainFolder || isFiltering,
       title: Row(
         children: [
           Expanded(child: Text(title)),
@@ -2606,7 +2820,7 @@ class _SongbookPageState extends State<SongbookPage> {
             ],
           )
         else
-          for (final song in songs)
+          for (final song in shownSongs)
             _buildSongTile(
               song,
               relativeDir: relativeDir,
@@ -3508,6 +3722,18 @@ class _SongbookPageState extends State<SongbookPage> {
 }
 
 // Pomocné modely použité len interne pri zostavovaní PDF a playlistu pre túto stránku.
+class _SongSearchEntry {
+  const _SongSearchEntry({
+    required this.title,
+    required this.subtitle,
+    required this.haystack,
+  });
+
+  final String title;
+  final String? subtitle;
+  final String haystack;
+}
+
 class _PdfColumnBlock {
   _PdfColumnBlock({
     required this.widget,
