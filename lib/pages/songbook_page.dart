@@ -16,7 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
 import '../services/song_display_builder.dart';
-import '../services/onedrive_repository.dart';
+import '../services/google_drive_repository.dart';
 import '../services/song_repository.dart';
 import '../services/word_playlist_builder.dart';
 import '../utils/chord_transposer.dart';
@@ -43,10 +43,13 @@ class _SongbookPageState extends State<SongbookPage> {
   static const String _prefSelectedSongPath = 'selected_song_path';
   static const String _prefFolderOrderMap = 'song_folder_order_map';
   static const String _prefPlaylistRoundCount = 'playlist_round_count';
-  static const String _prefOneDriveShareUrl = 'onedrive_shared_folder_url';
-  static const String _msalClientId = String.fromEnvironment(
-    'MSAL_CLIENT_ID',
-    defaultValue: '1fd7039e-ca00-4b94-bfda-9c1a1916033b',
+  static const String _prefDriveFolderUrl = 'google_drive_folder_url';
+  // OAuth Client ID z Google Cloud Console (typ Web application).
+  // Je verejný, môžeš ho vložiť sem alebo zadať cez --dart-define=GOOGLE_CLIENT_ID=...
+  static const String _googleClientId = String.fromEnvironment(
+    'GOOGLE_CLIENT_ID',
+    defaultValue:
+        '794458736034-mu7ghlmkspm2n931h04esfc450f92cst.apps.googleusercontent.com',
   );
 
   final TextEditingController _editorController = TextEditingController();
@@ -104,19 +107,18 @@ class _SongbookPageState extends State<SongbookPage> {
   Future<void> _restoreSession() async {
     final prefs = await SharedPreferences.getInstance();
     if (kIsWeb) {
-      final sharingUrl = prefs.getString(_prefOneDriveShareUrl);
-      if (sharingUrl == null || sharingUrl.isEmpty || _msalClientId.isEmpty) {
+      final sharingUrl = prefs.getString(_prefDriveFolderUrl);
+      if (sharingUrl == null || sharingUrl.isEmpty || _googleClientId.isEmpty) {
         return;
       }
 
       try {
-        _cloudAccount = await OneDriveRepository.instance.initializeAuth(
-          _msalClientId,
-          Uri.base.resolve('redirect.html').toString(),
+        _cloudAccount = await GoogleDriveRepository.instance.initializeAuth(
+          _googleClientId,
         );
         if (_cloudAccount == null) return;
 
-        final root = await OneDriveRepository.instance.openSharedFolder(
+        final root = await GoogleDriveRepository.instance.openSharedFolder(
           sharingUrl,
         );
         if (!mounted) return;
@@ -159,7 +161,7 @@ class _SongbookPageState extends State<SongbookPage> {
 
   Future<void> _pickFolder() async {
     if (kIsWeb) {
-      await _connectOneDriveFolder();
+      await _connectGoogleDriveFolder();
       return;
     }
 
@@ -193,31 +195,26 @@ class _SongbookPageState extends State<SongbookPage> {
     await _loadSongs();
   }
 
-  Future<void> _connectOneDriveFolder() async {
-    if (_msalClientId.isEmpty) {
-      _showMessage(
-        'Najprv nastav MSAL_CLIENT_ID z registrácie Microsoft aplikácie.',
-      );
+  Future<void> _connectGoogleDriveFolder() async {
+    if (_googleClientId.isEmpty) {
+      _showMessage('Najprv nastav GOOGLE_CLIENT_ID z Google Cloud Console.');
       return;
     }
 
     try {
-      final repository = OneDriveRepository.instance;
-      _cloudAccount = await repository.initializeAuth(
-        _msalClientId,
-        Uri.base.resolve('redirect.html').toString(),
-      );
+      final repository = GoogleDriveRepository.instance;
+      _cloudAccount = await repository.initializeAuth(_googleClientId);
       _cloudAccount ??= await repository.signIn();
       if (_cloudAccount == null) return;
 
       final prefs = await SharedPreferences.getInstance();
-      final sharingUrl = await _showOneDriveUrlDialog(
-        initialValue: prefs.getString(_prefOneDriveShareUrl),
+      final sharingUrl = await _showDriveUrlDialog(
+        initialValue: prefs.getString(_prefDriveFolderUrl),
       );
       if (sharingUrl == null || sharingUrl.isEmpty) return;
 
       final root = await repository.openSharedFolder(sharingUrl);
-      await prefs.setString(_prefOneDriveShareUrl, sharingUrl);
+      await prefs.setString(_prefDriveFolderUrl, sharingUrl);
       if (!mounted) return;
 
       setState(() {
@@ -236,24 +233,26 @@ class _SongbookPageState extends State<SongbookPage> {
       final account = _cloudAccount;
       _showMessage(
         account == null
-            ? 'Nepodarilo sa pripojiť OneDrive: $error'
-            : 'OneDrive odmietol prístup pre účet $account. Odhlás sa a použi účet, s ktorým je priečinok zdieľaný. Skontroluj, že má oprávnenie na úpravy. ($error)',
+            ? 'Nepodarilo sa pripojiť Google Disk: $error'
+            : 'Google Disk odmietol prístup pre účet $account. Odhlás sa a použi účet, s ktorým je priečinok zdieľaný. Skontroluj, že má oprávnenie na úpravy. ($error)',
       );
     }
   }
 
-  Future<String?> _showOneDriveUrlDialog({String? initialValue}) async {
+  Future<String?> _showDriveUrlDialog({String? initialValue}) async {
     final controller = TextEditingController(text: initialValue ?? '');
     return showDialog<String>(
       context: context,
       builder:
           (context) => AlertDialog(
-            title: const Text('Zdieľaný OneDrive priečinok'),
+            title: const Text('Zdieľaný priečinok Google Disku'),
             content: TextField(
               controller: controller,
               autofocus: true,
               keyboardType: TextInputType.url,
-              decoration: const InputDecoration(labelText: 'Zdieľací odkaz'),
+              decoration: const InputDecoration(
+                labelText: 'Odkaz na priečinok na Google Disku',
+              ),
             ),
             actions: [
               TextButton(
@@ -270,12 +269,12 @@ class _SongbookPageState extends State<SongbookPage> {
     );
   }
 
-  Future<void> _signOutOneDrive() async {
+  Future<void> _signOutGoogleDrive() async {
     try {
-      await OneDriveRepository.instance.signOut();
+      await GoogleDriveRepository.instance.signOut();
     } finally {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.remove(_prefOneDriveShareUrl);
+      await prefs.remove(_prefDriveFolderUrl);
       await prefs.remove(_prefSelectedSongPath);
       if (mounted) {
         setState(() {
@@ -309,11 +308,11 @@ class _SongbookPageState extends State<SongbookPage> {
     try {
       final loadedSongs =
           kIsWeb
-              ? await OneDriveRepository.instance.loadSongs()
+              ? await GoogleDriveRepository.instance.loadSongs()
               : await SongRepository.loadFromFolder(folderPath);
       final loadedFolders =
           kIsWeb
-              ? OneDriveRepository.instance.getAllSubfolders()
+              ? GoogleDriveRepository.instance.getAllSubfolders()
               : SongRepository.getAllSubfolders(folderPath);
 
       ProSongFile? selected;
@@ -1013,7 +1012,7 @@ class _SongbookPageState extends State<SongbookPage> {
     final updatedContent = _editorController.text;
     try {
       if (kIsWeb) {
-        await OneDriveRepository.instance.saveSong(
+        await GoogleDriveRepository.instance.saveSong(
           selectedSong.path,
           updatedContent,
         );
@@ -1080,7 +1079,7 @@ class _SongbookPageState extends State<SongbookPage> {
 
     try {
       if (kIsWeb) {
-        await OneDriveRepository.instance.createSong(path, initialContent);
+        await GoogleDriveRepository.instance.createSong(path, initialContent);
       } else {
         final file = File(path);
         if (file.existsSync()) {
@@ -1164,7 +1163,7 @@ class _SongbookPageState extends State<SongbookPage> {
       );
 
       if (kIsWeb) {
-        await OneDriveRepository.instance.saveSong(
+        await GoogleDriveRepository.instance.saveSong(
           selectedSong.path,
           transposedContent,
         );
@@ -1771,7 +1770,10 @@ class _SongbookPageState extends State<SongbookPage> {
       speed.round(),
     );
     if (kIsWeb) {
-      await OneDriveRepository.instance.saveSong(selectedSong.path, newContent);
+      await GoogleDriveRepository.instance.saveSong(
+        selectedSong.path,
+        newContent,
+      );
     } else {
       await SongRepository.saveSong(selectedSong.path, newContent);
     }
@@ -1894,7 +1896,7 @@ class _SongbookPageState extends State<SongbookPage> {
             if (isNarrowToolbar)
               IconButton(
                 onPressed: _pickFolder,
-                tooltip: kIsWeb ? 'OneDrive priečinok' : 'Vybrať priečinok',
+                tooltip: kIsWeb ? 'Priečinok Google Disku' : 'Vybrať priečinok',
                 icon: const Icon(Icons.folder_open),
               )
             else
@@ -1903,16 +1905,18 @@ class _SongbookPageState extends State<SongbookPage> {
                 icon: const Icon(Icons.folder_open),
                 label: Text(
                   isCompactToolbar
-                      ? (kIsWeb ? 'OneDrive' : 'Priečinok')
-                      : (kIsWeb ? 'OneDrive priečinok' : 'Vybrať priečinok'),
+                      ? (kIsWeb ? 'Google Disk' : 'Priečinok')
+                      : (kIsWeb
+                          ? 'Priečinok Google Disku'
+                          : 'Vybrať priečinok'),
                 ),
               ),
             if (kIsWeb)
               IconButton(
-                onPressed: _signOutOneDrive,
+                onPressed: _signOutGoogleDrive,
                 tooltip:
                     _cloudAccount == null
-                        ? 'Odhlásiť OneDrive účet'
+                        ? 'Odhlásiť Google účet'
                         : 'Odhlásiť $_cloudAccount',
                 icon: const Icon(Icons.logout),
               ),
@@ -2029,14 +2033,14 @@ class _SongbookPageState extends State<SongbookPage> {
         children: [
           Text(
             kIsWeb
-                ? 'Pripoj zdieľaný priečinok OneDrive so skladbami.'
+                ? 'Pripoj zdieľaný priečinok Google Disku so skladbami.'
                 : 'Vyber priečinok so skladbami vo formáte .pro',
           ),
           const SizedBox(height: 16),
           ElevatedButton.icon(
             onPressed: _pickFolder,
             icon: const Icon(Icons.folder_open),
-            label: Text(kIsWeb ? 'Pripojiť OneDrive' : 'Vybrať priečinok'),
+            label: Text(kIsWeb ? 'Pripojiť Google Disk' : 'Vybrať priečinok'),
           ),
         ],
       ),
@@ -2916,7 +2920,7 @@ class _SongbookPageState extends State<SongbookPage> {
     final safe = name.replaceAll(RegExp(r'[\\/:*?"<>|]'), '_');
     try {
       if (kIsWeb) {
-        await OneDriveRepository.instance.createFolder(safe);
+        await GoogleDriveRepository.instance.createFolder(safe);
       } else {
         final target = '$folderPath$_pathSeparator$safe';
         final dir = Directory(target);
@@ -3007,7 +3011,7 @@ class _SongbookPageState extends State<SongbookPage> {
 
     try {
       if (kIsWeb) {
-        await OneDriveRepository.instance.duplicateFolder(
+        await GoogleDriveRepository.instance.duplicateFolder(
           normalized,
           targetRelative,
         );
@@ -3075,7 +3079,7 @@ class _SongbookPageState extends State<SongbookPage> {
 
     try {
       if (kIsWeb) {
-        await OneDriveRepository.instance.renameFolder(normalized, safeName);
+        await GoogleDriveRepository.instance.renameFolder(normalized, safeName);
       } else {
         final sourcePath =
             '$folderPath$_pathSeparator${normalized.replaceAll('/', _pathSeparator)}';
@@ -3286,7 +3290,7 @@ class _SongbookPageState extends State<SongbookPage> {
 
     try {
       if (kIsWeb) {
-        await OneDriveRepository.instance.deleteFolder(relativeDir);
+        await GoogleDriveRepository.instance.deleteFolder(relativeDir);
       } else {
         final targetPath =
             '$folderPath$_pathSeparator${relativeDir.replaceAll('/', _pathSeparator)}';
@@ -3326,7 +3330,7 @@ class _SongbookPageState extends State<SongbookPage> {
 
     try {
       if (kIsWeb) {
-        await OneDriveRepository.instance.deleteSong(song.path);
+        await GoogleDriveRepository.instance.deleteSong(song.path);
       } else {
         final file = File(song.path);
         if (!file.existsSync()) {
@@ -3415,7 +3419,7 @@ class _SongbookPageState extends State<SongbookPage> {
     final safeRel = relativeDir.replaceAll('\\', '/').trim();
     if (kIsWeb) {
       try {
-        final targetPath = await OneDriveRepository.instance.copySong(
+        final targetPath = await GoogleDriveRepository.instance.copySong(
           song.path,
           safeRel,
         );
@@ -3529,7 +3533,7 @@ class _SongbookPageState extends State<SongbookPage> {
     final safeRel = relativeDir.replaceAll('\\', '/').trim();
     if (kIsWeb) {
       try {
-        await OneDriveRepository.instance.copySong(song.path, safeRel);
+        await GoogleDriveRepository.instance.copySong(song.path, safeRel);
       } catch (error) {
         _showMessage('Nepodarilo sa skopírovať súbor: $error');
       }

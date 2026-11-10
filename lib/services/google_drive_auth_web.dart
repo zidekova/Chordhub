@@ -1,23 +1,20 @@
 import 'dart:js_interop';
 
-@JS('window.chordHubOneDriveAuth.initialize')
-external JSPromise<JSString?> _initialize(
-  JSString clientId,
-  JSString redirectUri,
-);
+@JS('window.chordHubGoogleAuth.initialize')
+external JSPromise<JSString?> _initialize(JSString clientId);
 
-@JS('window.chordHubOneDriveAuth.signIn')
+@JS('window.chordHubGoogleAuth.signIn')
 external JSPromise<JSString?> _signIn();
 
-@JS('window.chordHubOneDriveAuth.acquireToken')
+@JS('window.chordHubGoogleAuth.acquireToken')
 external JSPromise<JSString> _acquireToken();
 
-@JS('window.chordHubOneDriveAuth.signOut')
+@JS('window.chordHubGoogleAuth.signOut')
 external JSPromise<JSAny?> _signOut();
 
-class OneDriveAuth {
-  static Future<String?> initialize(String clientId, String redirectUri) async {
-    final username = await _initialize(clientId.toJS, redirectUri.toJS).toDart;
+class GoogleDriveAuth {
+  static Future<String?> initialize(String clientId) async {
+    final username = await _initialize(clientId.toJS).toDart;
     return username?.toDart;
   }
 
