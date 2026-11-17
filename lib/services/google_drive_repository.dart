@@ -1,6 +1,9 @@
+import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 
 import 'package:http/http.dart' as http;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
 import 'google_drive_auth.dart';
@@ -13,6 +16,41 @@ class GoogleDriveRoot {
   final String name;
 }
 
+/// Naposledy načítaný zoznam, uložený v prehliadači.
+class DriveSnapshot {
+  const DriveSnapshot({
+    required this.root,
+    required this.songs,
+    required this.folders,
+  });
+
+  final GoogleDriveRoot root;
+  final List<ProSongFile> songs;
+  final List<String> folders;
+}
+
+class _CachedFile {
+  _CachedFile({required this.path, required this.md5, required this.content});
+
+  final String path; // relatívna cesta voči koreňovému priečinku
+  final String md5;
+  final String content;
+}
+
+class _DriveFile {
+  _DriveFile({
+    required this.id,
+    required this.name,
+    required this.relativePath,
+    required this.md5,
+  });
+
+  final String id;
+  final String name;
+  final String relativePath;
+  final String md5;
+}
+
 class GoogleDriveRepository {
   GoogleDriveRepository._();
 
@@ -22,10 +60,20 @@ class GoogleDriveRepository {
   static const String _uploadRoot =
       'https://www.googleapis.com/upload/drive/v3';
   static const String _folderMime = 'application/vnd.google-apps.folder';
-  static const String _fileFields =
-      'id,name,mimeType,md5Checksum,modifiedTime';
+  static const String _fileFields = 'id,name,mimeType,md5Checksum,modifiedTime';
+
+  static const String _cachePrefKey = 'google_drive_cache_v1';
+  static const int _maxParallelRequests = 8;
 
   final http.Client _client = http.Client();
+
+  // Obsah súborov podľa ID, aby sa sťahovali iba zmenené skladby.
+  final Map<String, _CachedFile> _cache = {};
+  String? _rootName;
+
+  // Obmedzenie počtu súbežných požiadaviek na Google.
+  int _activeRequests = 0;
+  final Queue<Completer<void>> _waiting = Queue<Completer<void>>();
 
   // Kontrolný súčet obsahu z času načítania, slúži na odhalenie súbežných úprav.
   final Map<String, String> _checksums = {};
@@ -35,29 +83,32 @@ class GoogleDriveRepository {
 
   String? get rootPath => _rootPath;
 
+  bool get isSignedIn => GoogleDriveAuth.isSignedIn();
+
   Future<String?> initializeAuth(String clientId) {
     return GoogleDriveAuth.initialize(clientId);
   }
 
   Future<String?> signIn() => GoogleDriveAuth.signIn();
 
-  Future<void> signOut() {
+  Future<void> signOut() async {
     _clearRoot();
-    return GoogleDriveAuth.signOut();
+    await _removePersistedCache();
+    await GoogleDriveAuth.signOut();
   }
 
   /// Otvorí priečinok na Google Disku podľa odkazu (alebo priamo podľa ID).
   Future<GoogleDriveRoot> openSharedFolder(String folderUrl) async {
     final folderId = _extractFolderId(folderUrl);
     if (folderId == null) {
-      throw Exception('Z odkazu sa nepodarilo zistiť ID priečinka Google Disku.');
+      throw Exception(
+        'Z odkazu sa nepodarilo zistiť ID priečinka Google Disku.',
+      );
     }
 
     final response = await _request(
       'GET',
-      _apiUri('/files/${_segment(folderId)}', {
-        'fields': 'id,name,mimeType',
-      }),
+      _apiUri('/files/${_segment(folderId)}', {'fields': 'id,name,mimeType'}),
       await GoogleDriveAuth.acquireToken(),
     );
     final item = _decodeJson(response) as Map<String, dynamic>;
@@ -65,60 +116,220 @@ class GoogleDriveRepository {
       throw Exception('Odkaz neukazuje na priečinok Google Disku.');
     }
 
-    _rootItemId = item['id'] as String;
+    final newRootId = item['id'] as String;
     final name = item['name'] as String? ?? 'Google Disk';
+    if (_rootItemId != newRootId) {
+      _cache.clear();
+      _checksums.clear();
+      _subfolders = [];
+    }
+    _rootItemId = newRootId;
+    _rootName = name;
     _rootPath = 'GoogleDrive/$name';
-    _checksums.clear();
-    _subfolders = [];
     return GoogleDriveRoot(path: _rootPath!, name: name);
   }
 
+  /// Načíta zoznam skladieb. Priečinky sa prechádzajú súbežne a sťahujú sa
+  /// iba súbory, ktorých kontrolný súčet sa zmenil od minulého načítania.
   Future<List<ProSongFile>> loadSongs() async {
     final rootItemId = _requiredRootItemId;
     final rootPath = _requiredRootPath;
-    final songs = <ProSongFile>[];
-    final folders = <String>{};
-    _checksums.clear();
 
-    Future<void> visit(String folderId, String relativeFolder) async {
+    // Ak token čoskoro vyprší, obnov ho hneď na začiatku (kým trvá kliknutie).
+    await GoogleDriveAuth.acquireToken(minValidityMs: 10 * 60 * 1000);
+
+    final folders = <String>{};
+    final files = <_DriveFile>[];
+
+    Future<void> walk(String folderId, String relativeFolder) async {
+      final subWalks = <Future<void>>[];
       for (final item in await _children(folderId)) {
         final name = item['name'] as String?;
         final itemId = item['id'] as String?;
         if (name == null || itemId == null) continue;
-        final relativePath =
-            relativeFolder.isEmpty ? name : '$relativeFolder/$name';
+        final relativePath = relativeFolder.isEmpty
+            ? name
+            : '$relativeFolder/$name';
 
         if (_isFolder(item)) {
           folders.add(relativePath);
-          await visit(itemId, relativePath);
+          subWalks.add(walk(itemId, relativePath));
           continue;
         }
 
         if (!name.toLowerCase().endsWith('.pro')) continue;
-        final path = '$rootPath/$relativePath';
-        final bytes = await _download(itemId);
-        final content = _decodeBytes(bytes);
-        final song = ParsedSong.fromContent(
-          content,
-          fallbackTitle: SongRepository.basenameWithoutExtension(name),
+        files.add(
+          _DriveFile(
+            id: itemId,
+            name: name,
+            relativePath: relativePath,
+            md5: item['md5Checksum'] as String? ?? '',
+          ),
         );
+      }
+      await Future.wait(subWalks);
+    }
+
+    await walk(rootItemId, '');
+
+    final newCache = <String, _CachedFile>{};
+    await Future.wait(
+      files.map((file) async {
+        final cached = _cache[file.id];
+        final String content;
+        if (cached != null && file.md5.isNotEmpty && cached.md5 == file.md5) {
+          content = cached.content;
+        } else {
+          content = _decodeBytes(await _download(file.id));
+        }
+        newCache[file.id] = _CachedFile(
+          path: file.relativePath,
+          md5: file.md5,
+          content: content,
+        );
+      }),
+    );
+
+    final songs = <ProSongFile>[];
+    final checksums = <String, String>{};
+    for (final file in files) {
+      final entry = newCache[file.id]!;
+      final path = '$rootPath/${file.relativePath}';
+      final song = ParsedSong.fromContent(
+        entry.content,
+        fallbackTitle: SongRepository.basenameWithoutExtension(file.name),
+      );
+      songs.add(
+        ProSongFile(
+          path: path,
+          title: song.title,
+          subtitle: song.subtitle,
+          content: entry.content,
+        ),
+      );
+      if (file.md5.isNotEmpty) checksums[path] = file.md5;
+    }
+
+    _cache
+      ..clear()
+      ..addAll(newCache);
+    _checksums
+      ..clear()
+      ..addAll(checksums);
+    _subfolders = folders.toList()..sort();
+    SongRepository.sortSongs(songs);
+    unawaited(_persistCache());
+    return songs;
+  }
+
+  /// Obnoví posledný uložený zoznam bez komunikácie s Google Diskom.
+  /// Vráti null, ak nie je čo obnoviť alebo cache patrí inému priečinku.
+  Future<DriveSnapshot?> restoreSnapshot(String folderUrl) async {
+    final folderId = _extractFolderId(folderUrl);
+    if (folderId == null) return null;
+
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_cachePrefKey);
+      if (raw == null) return null;
+
+      final data = jsonDecode(raw) as Map<String, dynamic>;
+      if (data['rootId'] != folderId) return null;
+
+      final name = data['rootName'] as String? ?? 'Google Disk';
+      final rootPath = 'GoogleDrive/$name';
+      final songs = <ProSongFile>[];
+      final cache = <String, _CachedFile>{};
+      final checksums = <String, String>{};
+
+      for (final entry
+          in (data['files'] as List<dynamic>? ?? const [])
+              .whereType<Map<String, dynamic>>()) {
+        final id = entry['id'] as String?;
+        final relativePath = entry['path'] as String?;
+        final content = entry['content'] as String?;
+        if (id == null || relativePath == null || content == null) continue;
+        final md5 = entry['md5'] as String? ?? '';
+
+        final fileName = relativePath.substring(
+          relativePath.lastIndexOf('/') + 1,
+        );
+        final parsed = ParsedSong.fromContent(
+          content,
+          fallbackTitle: SongRepository.basenameWithoutExtension(fileName),
+        );
+        final path = '$rootPath/$relativePath';
         songs.add(
           ProSongFile(
             path: path,
-            title: song.title,
-            subtitle: song.subtitle,
+            title: parsed.title,
+            subtitle: parsed.subtitle,
             content: content,
           ),
         );
-        final checksum = item['md5Checksum'] as String?;
-        if (checksum != null) _checksums[path] = checksum;
+        cache[id] = _CachedFile(path: relativePath, md5: md5, content: content);
+        if (md5.isNotEmpty) checksums[path] = md5;
       }
-    }
 
-    await visit(rootItemId, '');
-    _subfolders = folders.toList()..sort();
-    SongRepository.sortSongs(songs);
-    return songs;
+      final folders = (data['folders'] as List<dynamic>? ?? const [])
+          .whereType<String>()
+          .toList();
+      SongRepository.sortSongs(songs);
+
+      _rootItemId = folderId;
+      _rootName = name;
+      _rootPath = rootPath;
+      _subfolders = folders;
+      _cache
+        ..clear()
+        ..addAll(cache);
+      _checksums
+        ..clear()
+        ..addAll(checksums);
+
+      return DriveSnapshot(
+        root: GoogleDriveRoot(path: rootPath, name: name),
+        songs: songs,
+        folders: folders,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> _persistCache() async {
+    final rootId = _rootItemId;
+    final rootName = _rootName;
+    if (rootId == null || rootName == null) return;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        _cachePrefKey,
+        jsonEncode({
+          'rootId': rootId,
+          'rootName': rootName,
+          'folders': _subfolders,
+          'files': [
+            for (final entry in _cache.entries)
+              {
+                'id': entry.key,
+                'path': entry.value.path,
+                'md5': entry.value.md5,
+                'content': entry.value.content,
+              },
+          ],
+        }),
+      );
+    } catch (_) {
+      // Cache je len urýchlenie, pri zlyhaní (napr. plné úložisko) ju preskočíme.
+    }
+  }
+
+  Future<void> _removePersistedCache() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_cachePrefKey);
+    } catch (_) {}
   }
 
   List<String> getAllSubfolders() => List.unmodifiable(_subfolders);
@@ -152,15 +363,23 @@ class GoogleDriveRepository {
     final updated = _decodeJson(response) as Map<String, dynamic>;
     final newChecksum = updated['md5Checksum'] as String?;
     if (newChecksum != null) _checksums[path] = newChecksum;
+    _cache[itemId] = _CachedFile(
+      path: _relative(path),
+      md5: newChecksum ?? '',
+      content: content,
+    );
+    unawaited(_persistCache());
   }
 
   Future<void> createSong(String path, String content) async {
     final relativePath = _relative(path);
     final separator = relativePath.lastIndexOf('/');
-    final fileName =
-        separator < 0 ? relativePath : relativePath.substring(separator + 1);
-    final relativeParent =
-        separator < 0 ? '' : relativePath.substring(0, separator);
+    final fileName = separator < 0
+        ? relativePath
+        : relativePath.substring(separator + 1);
+    final relativeParent = separator < 0
+        ? ''
+        : relativePath.substring(0, separator);
     final parentId = await _resolveFolder(relativeParent);
     await _assertNameFree(parentId, fileName);
     await _createFile(parentId, fileName, utf8.encode(content));
@@ -310,10 +529,9 @@ class GoogleDriveRepository {
         }
       }
 
-      itemId =
-          folder != null
-              ? folder['id'] as String
-              : await _createFolderItem(itemId, segment);
+      itemId = folder != null
+          ? folder['id'] as String
+          : await _createFolderItem(itemId, segment);
     }
     return itemId;
   }
@@ -407,8 +625,9 @@ class GoogleDriveRepository {
         await GoogleDriveAuth.acquireToken(),
       );
       final data = _decodeJson(response) as Map<String, dynamic>;
-      for (final item in (data['files'] as List<dynamic>? ?? const [])
-          .whereType<Map<String, dynamic>>()) {
+      for (final item
+          in (data['files'] as List<dynamic>? ?? const [])
+              .whereType<Map<String, dynamic>>()) {
         // Google Dokumenty, Tabuľky a odkazy nemajú stiahnuteľný obsah.
         final mime = item['mimeType'] as String? ?? '';
         if (mime.startsWith('application/vnd.google-apps.') &&
@@ -446,14 +665,14 @@ class GoogleDriveRepository {
         ...headers,
       });
     if (bodyBytes != null) request.bodyBytes = bodyBytes;
-    final response = await http.Response.fromStream(
-      await _client.send(request),
+    final response = await _limited(
+      () async => http.Response.fromStream(await _client.send(request)),
     );
     if (response.statusCode < 200 || response.statusCode >= 300) {
       var message = response.reasonPhrase ?? 'chyba Google Drive API';
       try {
-        final data = jsonDecode(utf8.decode(response.bodyBytes))
-            as Map<String, dynamic>;
+        final data =
+            jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
         message =
             ((data['error'] as Map<String, dynamic>?)?['message'] as String?) ??
             message;
@@ -463,15 +682,32 @@ class GoogleDriveRepository {
     return response;
   }
 
+  Future<T> _limited<T>(Future<T> Function() task) async {
+    if (_activeRequests >= _maxParallelRequests) {
+      final turn = Completer<void>();
+      _waiting.add(turn);
+      await turn.future; // miesto nám odovzdá predchádzajúca požiadavka
+    } else {
+      _activeRequests++;
+    }
+    try {
+      return await task();
+    } finally {
+      if (_waiting.isNotEmpty) {
+        _waiting.removeFirst().complete();
+      } else {
+        _activeRequests--;
+      }
+    }
+  }
+
   Uri _apiUri(String path, [Map<String, String> query = const {}]) =>
-      Uri.parse('$_apiRoot$path').replace(
-        queryParameters: {'supportsAllDrives': 'true', ...query},
-      );
+      Uri.parse('$_apiRoot$path')
+          .replace(queryParameters: {'supportsAllDrives': 'true', ...query});
 
   Uri _uploadUri(String path, [Map<String, String> query = const {}]) =>
-      Uri.parse('$_uploadRoot$path').replace(
-        queryParameters: {'supportsAllDrives': 'true', ...query},
-      );
+      Uri.parse('$_uploadRoot$path')
+          .replace(queryParameters: {'supportsAllDrives': 'true', ...query});
 
   /// Akceptuje odkaz typu https://drive.google.com/drive/folders/<ID>?usp=sharing,
   /// odkaz s parametrom ?id=<ID>, alebo samotné ID.
@@ -500,26 +736,26 @@ class GoogleDriveRepository {
     final normalizedPath = path.replaceAll('\\', '/');
     final root = _requiredRootPath.replaceAll('\\', '/');
     if (normalizedPath != root && !normalizedPath.startsWith('$root/')) {
-      throw ArgumentError('Súbor nepatrí do aktuálneho priečinka Google Disku.');
+      throw ArgumentError(
+        'Súbor nepatrí do aktuálneho priečinka Google Disku.',
+      );
     }
     return normalizedPath == root
         ? ''
         : normalizedPath.substring(root.length + 1);
   }
 
-  List<String> _pathSegments(String path) =>
-      path
-          .replaceAll('\\', '/')
-          .split('/')
-          .where((segment) => segment.isNotEmpty)
-          .toList();
+  List<String> _pathSegments(String path) => path
+      .replaceAll('\\', '/')
+      .split('/')
+      .where((segment) => segment.isNotEmpty)
+      .toList();
 
-  String _join(String first, String second) =>
-      first.isEmpty
-          ? second
-          : second.isEmpty
-          ? first
-          : '$first/$second';
+  String _join(String first, String second) => first.isEmpty
+      ? second
+      : second.isEmpty
+      ? first
+      : '$first/$second';
 
   String _segment(String value) => Uri.encodeComponent(value);
 
@@ -533,7 +769,9 @@ class GoogleDriveRepository {
 
   void _clearRoot() {
     _rootItemId = null;
+    _rootName = null;
     _rootPath = null;
+    _cache.clear();
     _checksums.clear();
     _subfolders = [];
   }

@@ -7,9 +7,11 @@ class GoogleDriveAuth {
     throw UnsupportedError('Google Drive web authentication is unavailable.');
   }
 
-  static Future<String> acquireToken() async {
+  static Future<String> acquireToken({int minValidityMs = 0}) async {
     throw UnsupportedError('Google Drive web authentication is unavailable.');
   }
+
+  static bool isSignedIn() => false;
 
   static Future<void> signOut() async {}
 }

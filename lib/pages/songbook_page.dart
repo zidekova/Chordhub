@@ -82,6 +82,8 @@ class _SongbookPageState extends State<SongbookPage> {
   final List<ProSongFile> _songs = [];
   ProSongFile? _selectedSong;
   bool _isLoading = false;
+  bool _isSyncing = false; // obnova na pozadí, zoznam ostáva viditeľný
+  bool _needsDriveLogin = false; // vypršalo prihlásenie do Google Disku
   bool _isEditing = false;
   int _transposeSemitones = 0;
   List<String> _subfolders = [];
@@ -112,22 +114,58 @@ class _SongbookPageState extends State<SongbookPage> {
         return;
       }
 
+      final repository = GoogleDriveRepository.instance;
+      var restoredFromCache = false;
       try {
-        _cloudAccount = await GoogleDriveRepository.instance.initializeAuth(
-          _googleClientId,
-        );
-        if (_cloudAccount == null) return;
+        _cloudAccount = await repository.initializeAuth(_googleClientId);
 
-        final root = await GoogleDriveRepository.instance.openSharedFolder(
-          sharingUrl,
-        );
+        // 1) Hneď zobraz naposledy uložený zoznam (bez čakania na Google).
+        final snapshot = await repository.restoreSnapshot(sharingUrl);
+        if (snapshot != null && mounted) {
+          final storedSelectedPath = prefs.getString(_prefSelectedSongPath);
+          ProSongFile? selected;
+          for (final song in snapshot.songs) {
+            if (song.path == storedSelectedPath) {
+              selected = song;
+              break;
+            }
+          }
+          selected ??= snapshot.songs.isNotEmpty ? snapshot.songs.first : null;
+
+          setState(() {
+            _folderPath = snapshot.root.path;
+            _songs
+              ..clear()
+              ..addAll(snapshot.songs);
+            _subfolders = snapshot.folders;
+            _selectedSong = selected;
+          });
+          _editorController.text = selected?.content ?? '';
+          restoredFromCache = true;
+        }
+
+        // 2) Na pozadí zoznam aktualizuj, ak je prihlásenie ešte platné.
+        if (repository.isSignedIn) {
+          final root = await repository.openSharedFolder(sharingUrl);
+          if (!mounted) return;
+          setState(() {
+            _folderPath = root.path;
+          });
+          await _loadSongs(background: restoredFromCache);
+        } else if (mounted) {
+          // Bez kliknutia používateľa prehliadač nepustí prihlasovacie okno.
+          setState(() {
+            _needsDriveLogin = true;
+          });
+        }
+      } catch (error) {
         if (!mounted) return;
-        setState(() {
-          _folderPath = root.path;
-        });
-        await _loadSongs();
-      } catch (_) {
-        if (mounted) {
+        if (restoredFromCache) {
+          setState(() {
+            _isSyncing = false;
+            _needsDriveLogin = _isAuthExpired(error);
+          });
+        } else {
           setState(() {
             _folderPath = null;
           });
@@ -204,7 +242,9 @@ class _SongbookPageState extends State<SongbookPage> {
     try {
       final repository = GoogleDriveRepository.instance;
       _cloudAccount = await repository.initializeAuth(_googleClientId);
-      _cloudAccount ??= await repository.signIn();
+      if (!repository.isSignedIn) {
+        _cloudAccount = await repository.signIn() ?? _cloudAccount;
+      }
       if (_cloudAccount == null) return;
 
       final prefs = await SharedPreferences.getInstance();
@@ -237,6 +277,58 @@ class _SongbookPageState extends State<SongbookPage> {
             : 'Google Disk odmietol prístup pre účet $account. Odhlás sa a použi účet, s ktorým je priečinok zdieľaný. Skontroluj, že má oprávnenie na úpravy. ($error)',
       );
     }
+  }
+
+  bool _isAuthExpired(Object error) {
+    final text = error.toString();
+    return text.contains('vypršalo') ||
+        text.contains('Najprv sa prihlás') ||
+        text.contains('(401)');
+  }
+
+  /// Volá sa z kliknutia na tlačidlo. Až vtedy smie prehliadač otvoriť
+  /// prihlasovacie okno Google.
+  Future<void> _reconnectGoogleDrive() async {
+    final repository = GoogleDriveRepository.instance;
+    try {
+      final account = await repository.signIn();
+      if (account != null) _cloudAccount = account;
+
+      final prefs = await SharedPreferences.getInstance();
+      final sharingUrl = prefs.getString(_prefDriveFolderUrl);
+      if (sharingUrl == null || sharingUrl.isEmpty) {
+        if (mounted) setState(() => _needsDriveLogin = false);
+        return;
+      }
+
+      final root = await repository.openSharedFolder(sharingUrl);
+      if (!mounted) return;
+      setState(() {
+        _folderPath = root.path;
+        _needsDriveLogin = false;
+      });
+      await _loadSongs(background: true);
+    } catch (error) {
+      if (mounted) {
+        _showMessage('Prihlásenie do Google Disku zlyhalo: $error');
+      }
+    }
+  }
+
+  Widget _buildDriveLoginBanner() {
+    return MaterialBanner(
+      leading: const Icon(Icons.cloud_off),
+      content: const Text(
+        'Prihlásenie do Google Disku vypršalo. Zobrazuje sa naposledy '
+        'načítaný zoznam.',
+      ),
+      actions: [
+        TextButton(
+          onPressed: _reconnectGoogleDrive,
+          child: const Text('Prihlásiť sa'),
+        ),
+      ],
+    );
   }
 
   Future<String?> _showDriveUrlDialog({String? initialValue}) async {
@@ -279,6 +371,8 @@ class _SongbookPageState extends State<SongbookPage> {
       if (mounted) {
         setState(() {
           _cloudAccount = null;
+          _needsDriveLogin = false;
+          _isSyncing = false;
           _folderPath = null;
           _songs.clear();
           _selectedSong = null;
@@ -293,6 +387,7 @@ class _SongbookPageState extends State<SongbookPage> {
   Future<void> _loadSongs({
     String? preferredSongPath,
     bool showErrors = true,
+    bool background = false,
   }) async {
     final folderPath = _folderPath;
     if (folderPath == null || folderPath.isEmpty) {
@@ -301,7 +396,11 @@ class _SongbookPageState extends State<SongbookPage> {
 
     if (mounted) {
       setState(() {
-        _isLoading = true;
+        if (background) {
+          _isSyncing = true;
+        } else {
+          _isLoading = true;
+        }
       });
     }
 
@@ -339,24 +438,35 @@ class _SongbookPageState extends State<SongbookPage> {
         return;
       }
 
+      // Pri obnove na pozadí neprerušíme úpravy ani transpozíciu práve
+      // otvorenej skladby.
+      final keepState = background && selected?.path == _selectedSong?.path;
+      final keepEditing = keepState && _isEditing;
+
       setState(() {
         _songs
           ..clear()
           ..addAll(loadedSongs);
         _selectedSong = selected;
         _subfolders = loadedFolders;
-        _isEditing = false;
-        _transposeSemitones = 0;
+        if (!keepState) {
+          _isEditing = false;
+          _transposeSemitones = 0;
+        }
         if (_showPlaylistBuilder) {
           _refreshPlaylistBuilderSource(loadedSongs);
         }
         _isLoading = false;
+        _isSyncing = false;
+        _needsDriveLogin = false;
       });
 
-      if (selected != null) {
-        _editorController.text = selected.content;
-      } else {
-        _editorController.clear();
+      if (!keepEditing) {
+        if (selected != null) {
+          _editorController.text = selected.content;
+        } else {
+          _editorController.clear();
+        }
       }
 
       await _persistSelectedSongPath(selected?.path);
@@ -365,10 +475,13 @@ class _SongbookPageState extends State<SongbookPage> {
       if (!mounted) {
         return;
       }
+      final authExpired = kIsWeb && _isAuthExpired(error);
       setState(() {
         _isLoading = false;
+        _isSyncing = false;
+        if (authExpired) _needsDriveLogin = true;
       });
-      if (showErrors) {
+      if (showErrors && !authExpired) {
         _showMessage('Nepodarilo sa načítať skladby: $error');
       }
     }
@@ -2001,27 +2114,41 @@ class _SongbookPageState extends State<SongbookPage> {
                 ),
             ],
             IconButton(
-              onPressed: _folderPath == null ? null : _loadSongs,
+              onPressed:
+                  _folderPath == null
+                      ? null
+                      : (kIsWeb && _needsDriveLogin
+                          ? _reconnectGoogleDrive
+                          : _loadSongs),
               tooltip: 'Obnoviť zoznam',
               icon: const Icon(Icons.refresh),
             ),
             const SizedBox(width: 8),
           ],
         ),
-        body:
-            _isLoading
-                ? const Center(child: CircularProgressIndicator())
-                : _folderPath == null
-                ? _buildFolderPrompt()
-                : _showPlaylistBuilder
-                ? _buildPlaylistBuilderPanel()
-                : Row(
-                  children: [
-                    SizedBox(width: 320, child: _buildSongListPanel()),
-                    const VerticalDivider(width: 1),
-                    Expanded(child: _buildSongDetailsPanel()),
-                  ],
-                ),
+        body: Column(
+          children: [
+            if (_isSyncing) const LinearProgressIndicator(minHeight: 2),
+            if (kIsWeb && _needsDriveLogin && _folderPath != null)
+              _buildDriveLoginBanner(),
+            Expanded(
+              child:
+                  _isLoading
+                      ? const Center(child: CircularProgressIndicator())
+                      : _folderPath == null
+                      ? _buildFolderPrompt()
+                      : _showPlaylistBuilder
+                      ? _buildPlaylistBuilderPanel()
+                      : Row(
+                        children: [
+                          SizedBox(width: 320, child: _buildSongListPanel()),
+                          const VerticalDivider(width: 1),
+                          Expanded(child: _buildSongDetailsPanel()),
+                        ],
+                      ),
+            ),
+          ],
+        ),
       ),
     );
   }

@@ -51,3 +51,8 @@ flutter build web --release --dart-define=GOOGLE_CLIENT_ID=TVOJE-CLIENT-ID.apps.
 ```
 
 Presná produkčná adresa (origin) musí byť pridaná v Google Cloud Console. Ak sa tá istá skladba upraví súčasne, aplikácia odmietne prepísať novšiu verziu a zobrazí upozornenie; treba obnoviť zoznam a zmeny zopakovať. Zmazané skladby a priečinky sa presúvajú do koša na Google Disku.
+
+### Rýchlosť a obnovenie po štarte
+
+Naposledy načítaný zoznam sa ukladá v prehliadači. Po otvorení aplikácie sa zobrazí hneď a na pozadí sa aktualizuje; z Google Disku sa sťahujú iba skladby, ktoré sa zmenili. Prístupový token Google platí približne hodinu a bez kliknutia ho prehliadač nepustí obnoviť. Ak vyprší, zobrazí sa hore pruh **Prihlásiť sa** a zoznam ostane viditeľný. Po odhlásení sa uložený zoznam zmaže.
+
