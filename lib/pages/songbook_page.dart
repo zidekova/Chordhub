@@ -4201,7 +4201,18 @@ class _SongbookPageState extends State<SongbookPage> {
                             borderRadius: BorderRadius.circular(8),
                           ),
                           padding: EdgeInsets.all(compact ? 8 : 12),
-                          child: preview,
+                          // Na mobile a tablete otvorí fullscreen dvojklik na skladbu.
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onDoubleTap:
+                                MediaQuery.sizeOf(context).width < 1100
+                                    ? () => _openPerformanceMode(
+                                      parsedSong,
+                                      displayLines,
+                                    )
+                                    : null,
+                            child: preview,
+                          ),
                         ),
               ),
             ],

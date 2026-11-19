@@ -38,6 +38,10 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
   Timer? _autoScrollTimer;
   late double _scrollSpeedPixelsPerSecond;
   bool _isAutoScrolling = true;
+  bool _userTouching = false; // prst na displeji: automatický posun sa pozastaví
+  Timer? _feedbackTimer;
+  bool _feedbackVisible = false;
+  IconData _feedbackIcon = Icons.pause;
 
   @override
   void initState() {
@@ -55,6 +59,7 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
   @override
   void dispose() {
     _autoScrollTimer?.cancel();
+    _feedbackTimer?.cancel();
     _scrollController.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
@@ -110,10 +115,135 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
     _startAutoScroll();
   }
 
+  /// Jedno klepnutie na skladbu pozastaví alebo znovu spustí scrollovanie.
+  void _onBodyTap() {
+    _toggleAutoScroll();
+    setState(() {
+      _feedbackIcon = _isAutoScrolling ? Icons.play_arrow : Icons.pause;
+      _feedbackVisible = true;
+    });
+    _feedbackTimer?.cancel();
+    _feedbackTimer = Timer(const Duration(milliseconds: 700), () {
+      if (mounted) {
+        setState(() {
+          _feedbackVisible = false;
+        });
+      }
+    });
+  }
+
+  /// Na úzkej obrazovke sú ovládacie prvky v spodnom paneli, aby sa neprekrývali.
+  void _showControlsSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder:
+          (sheetContext) => StatefulBuilder(
+            builder: (context, setSheetState) {
+              void update(VoidCallback change) {
+                change();
+                setSheetState(() {});
+              }
+
+              final textTheme = Theme.of(context).textTheme;
+              return SafeArea(
+                child: Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Transpozícia', style: textTheme.titleSmall),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          IconButton.filledTonal(
+                            onPressed: () => update(() => _changeTransposeBy(-1)),
+                            tooltip: 'Transpozícia -1',
+                            icon: const Icon(Icons.remove),
+                          ),
+                          SizedBox(
+                            width: 56,
+                            child: Center(
+                              child: Text(
+                                '$_transposeSemitones',
+                                style: textTheme.titleLarge,
+                              ),
+                            ),
+                          ),
+                          IconButton.filledTonal(
+                            onPressed: () => update(() => _changeTransposeBy(1)),
+                            tooltip: 'Transpozícia +1',
+                            icon: const Icon(Icons.add),
+                          ),
+                          const Spacer(),
+                          TextButton(
+                            onPressed:
+                                () => update(() {
+                                  setState(() {
+                                    _transposeSemitones = 0;
+                                  });
+                                }),
+                            child: const Text('Reset'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      Text('Rýchlosť scrollovania', style: textTheme.titleSmall),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          IconButton.filledTonal(
+                            onPressed:
+                                () => update(() => _changeScrollSpeedBy(-4)),
+                            tooltip: 'Spomaliť scrollovanie',
+                            icon: const Icon(Icons.remove),
+                          ),
+                          SizedBox(
+                            width: 88,
+                            child: Center(
+                              child: Text(
+                                '${_scrollSpeedPixelsPerSecond.round()} px/s',
+                                style: textTheme.titleMedium,
+                              ),
+                            ),
+                          ),
+                          IconButton.filledTonal(
+                            onPressed:
+                                () => update(() => _changeScrollSpeedBy(4)),
+                            tooltip: 'Zrýchliť scrollovanie',
+                            icon: const Icon(Icons.add),
+                          ),
+                          const Spacer(),
+                          TextButton.icon(
+                            onPressed:
+                                widget.onSaveScrollSpeed == null
+                                    ? null
+                                    : () {
+                                      Navigator.of(sheetContext).pop();
+                                      _saveScrollSpeed();
+                                    },
+                            icon: const Icon(Icons.save_outlined),
+                            label: const Text('Uložiť'),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              );
+            },
+          ),
+    );
+  }
+
   void _startAutoScroll() {
     _autoScrollTimer?.cancel();
     _autoScrollTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
-      if (!mounted || !_isAutoScrolling || !_scrollController.hasClients) {
+      if (!mounted ||
+          !_isAutoScrolling ||
+          _userTouching ||
+          !_scrollController.hasClients) {
         return;
       }
 
@@ -208,7 +338,7 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
     final widthByContent = (constraints.maxWidth - 44) / (maxLineWidth + 12);
     final heightBoost = (constraints.maxHeight / 900).clamp(1.0, 1.35);
     final scale = widthByContent * 0.95 * heightBoost;
-    return scale.clamp(0.9, 2.8);
+    return scale.clamp(0.55, 2.8);
   }
 
   double _measureTextWidth(BuildContext context, String text, TextStyle style) {
@@ -227,8 +357,19 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
 
   @override
   Widget build(BuildContext context) {
+    final width = MediaQuery.sizeOf(context).width;
+    final isPhone = width < 700;
+    final useCompactActions = width < 1000;
+
+    final playPauseButton = IconButton(
+      onPressed: _toggleAutoScroll,
+      tooltip: _isAutoScrolling ? 'Zastaviť scrollovanie' : 'Spustiť scrollovanie',
+      icon: Icon(_isAutoScrolling ? Icons.pause_circle : Icons.play_circle),
+    );
+
     return Scaffold(
       appBar: AppBar(
+        titleSpacing: isPhone ? 0 : null,
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -247,55 +388,72 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
           icon: const Icon(Icons.fullscreen_exit),
           onPressed: () => Navigator.of(context).pop(),
         ),
-        actions: [
-          IconButton(
-            onPressed: () => _changeTransposeBy(-1),
-            tooltip: 'Transpozícia -1',
-            icon: const Icon(Icons.remove),
-          ),
-          Center(child: Text('$_transposeSemitones')),
-          IconButton(
-            onPressed: () => _changeTransposeBy(1),
-            tooltip: 'Transpozícia +1',
-            icon: const Icon(Icons.add),
-          ),
-          const SizedBox(width: 10),
-          IconButton(
-            onPressed: () => _changeScrollSpeedBy(-4),
-            tooltip: 'Spomaliť scrollovanie',
-            icon: const Icon(Icons.remove_circle_outline),
-          ),
-          Center(child: Text('${_scrollSpeedPixelsPerSecond.round()} px/s')),
-          IconButton(
-            onPressed: () => _changeScrollSpeedBy(4),
-            tooltip: 'Zrýchliť scrollovanie',
-            icon: const Icon(Icons.add_circle_outline),
-          ),
-          IconButton(
-            onPressed:
-                widget.onSaveScrollSpeed == null ? null : _saveScrollSpeed,
-            tooltip: 'Uložiť rýchlosť scrollovania do piesne',
-            icon: const Icon(Icons.save_outlined),
-          ),
-          IconButton(
-            onPressed: _toggleAutoScroll,
-            tooltip:
-                _isAutoScrolling
-                    ? 'Zastaviť scrollovanie'
-                    : 'Spustiť scrollovanie',
-            icon: Icon(
-              _isAutoScrolling ? Icons.pause_circle : Icons.play_circle,
-            ),
-          ),
-          TextButton(
-            onPressed: () {
-              setState(() {
-                _transposeSemitones = 0;
-              });
-            },
-            child: const Text('Reset'),
-          ),
-        ],
+        actions:
+            isPhone
+                ? [
+                  playPauseButton,
+                  IconButton(
+                    onPressed: _showControlsSheet,
+                    tooltip: 'Transpozícia a rýchlosť',
+                    icon: const Icon(Icons.tune),
+                  ),
+                ]
+                : [
+                  IconButton(
+                    onPressed: () => _changeTransposeBy(-1),
+                    tooltip: 'Transpozícia -1',
+                    icon: const Icon(Icons.remove),
+                  ),
+                  Center(child: Text('$_transposeSemitones')),
+                  IconButton(
+                    onPressed: () => _changeTransposeBy(1),
+                    tooltip: 'Transpozícia +1',
+                    icon: const Icon(Icons.add),
+                  ),
+                  const SizedBox(width: 10),
+                  IconButton(
+                    onPressed: () => _changeScrollSpeedBy(-4),
+                    tooltip: 'Spomaliť scrollovanie',
+                    icon: const Icon(Icons.remove_circle_outline),
+                  ),
+                  Center(
+                    child: Text('${_scrollSpeedPixelsPerSecond.round()} px/s'),
+                  ),
+                  IconButton(
+                    onPressed: () => _changeScrollSpeedBy(4),
+                    tooltip: 'Zrýchliť scrollovanie',
+                    icon: const Icon(Icons.add_circle_outline),
+                  ),
+                  IconButton(
+                    onPressed:
+                        widget.onSaveScrollSpeed == null
+                            ? null
+                            : _saveScrollSpeed,
+                    tooltip: 'Uložiť rýchlosť scrollovania do piesne',
+                    icon: const Icon(Icons.save_outlined),
+                  ),
+                  playPauseButton,
+                  if (useCompactActions)
+                    IconButton(
+                      onPressed: () {
+                        setState(() {
+                          _transposeSemitones = 0;
+                        });
+                      },
+                      tooltip: 'Reset transpozície',
+                      icon: const Icon(Icons.restart_alt),
+                    )
+                  else
+                    TextButton(
+                      onPressed: () {
+                        setState(() {
+                          _transposeSemitones = 0;
+                        });
+                      },
+                      child: const Text('Reset'),
+                    ),
+                  const SizedBox(width: 4),
+                ],
       ),
       body: LayoutBuilder(
         builder: (context, constraints) {
@@ -347,19 +505,55 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
 
               return KeyEventResult.ignored;
             },
-            child: ListView.builder(
-              controller: _scrollController,
-              padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-              itemCount: widget.displayLines.length,
-              itemBuilder: (context, index) {
-                final line = widget.displayLines[index];
-                return ChordLineView(
-                  line: line.rawLine,
-                  inChorus: line.isChorus,
-                  transposeSemitones: _transposeSemitones,
-                  fontScale: fontScale,
-                );
-              },
+            child: Stack(
+              fit: StackFit.expand,
+              children: [
+                // Prst na displeji pozastaví automatický posun, aby sa
+                // nebil s ručným posúvaním. Jedno klepnutie ho zastaví/spustí.
+                Listener(
+                  onPointerDown: (_) => _userTouching = true,
+                  onPointerUp: (_) => _userTouching = false,
+                  onPointerCancel: (_) => _userTouching = false,
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: _onBodyTap,
+                    child: ListView.builder(
+                      controller: _scrollController,
+                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
+                      itemCount: widget.displayLines.length,
+                      itemBuilder: (context, index) {
+                        final line = widget.displayLines[index];
+                        return ChordLineView(
+                          line: line.rawLine,
+                          inChorus: line.isChorus,
+                          transposeSemitones: _transposeSemitones,
+                          fontScale: fontScale,
+                        );
+                      },
+                    ),
+                  ),
+                ),
+                Center(
+                  child: IgnorePointer(
+                    child: AnimatedOpacity(
+                      opacity: _feedbackVisible ? 1 : 0,
+                      duration: const Duration(milliseconds: 150),
+                      child: Container(
+                        padding: const EdgeInsets.all(20),
+                        decoration: const BoxDecoration(
+                          color: Colors.black54,
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          _feedbackIcon,
+                          size: 48,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           );
         },
