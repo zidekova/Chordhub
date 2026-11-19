@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import '../models/song.dart';
+import 'song_file_order.dart';
 
 class SongRepository {
   static Future<List<ProSongFile>> loadFromFolder(String folderPath) async {
@@ -111,10 +112,19 @@ class SongRepository {
   static String basenameWithoutExtension(String fullPath) {
     final fileName = basename(fullPath);
     final extensionIndex = fileName.lastIndexOf('.');
-    if (extensionIndex <= 0) {
-      return fileName;
+    final base =
+        extensionIndex <= 0 ? fileName : fileName.substring(0, extensionIndex);
+    // Číselná predpona určuje len poradie, nie názov skladby.
+    return SongFileOrder.stripPrefix(base);
+  }
+
+  /// Premenuje súbor skladby. Existujúci súbor s cieľovým názvom neprepíše.
+  static Future<void> renameFile(String oldPath, String newPath) async {
+    if (oldPath == newPath) return;
+    if (File(newPath).existsSync()) {
+      throw Exception('Súbor ${basename(newPath)} už existuje.');
     }
-    return fileName.substring(0, extensionIndex);
+    await File(oldPath).rename(newPath);
   }
 
   static List<String> getAllSubfolders(String rootPath) {

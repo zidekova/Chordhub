@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
 import 'google_drive_auth.dart';
+import 'song_file_order.dart';
 import 'song_repository.dart';
 
 class GoogleDriveRoot {
@@ -423,19 +424,16 @@ class GoogleDriveRepository {
   Future<String> copySong(String sourcePath, String targetFolder) async {
     final source = await _findItem(sourcePath);
     final sourceName = source['name'] as String;
-    final baseName = SongRepository.basenameWithoutExtension(sourceName);
-    final extension = sourceName.substring(sourceName.lastIndexOf('.'));
     final targetFolderId = await _ensureFolder(targetFolder);
-    final existingNames = {
+    final existingNames = [
       for (final item in await _children(targetFolderId))
-        (item['name'] as String).toLowerCase(),
-    };
-    var fileName = sourceName;
-    var counter = 1;
-    while (existingNames.contains(fileName.toLowerCase())) {
-      fileName = '${baseName}_copy$counter$extension';
-      counter++;
-    }
+        item['name'] as String,
+    ];
+    final fileName = SongFileOrder.nameForCopy(
+      sourceFileName: sourceName,
+      targetIsSubfolder: _pathSegments(targetFolder).isNotEmpty,
+      existingNames: existingNames,
+    );
 
     final bytes = await _download(source['id'] as String);
     final targetPath =
@@ -443,6 +441,46 @@ class GoogleDriveRepository {
         '${_join(targetFolder, fileName)}';
     await _createFile(targetFolderId, fileName, bytes);
     return targetPath;
+  }
+
+  /// Premenuje skladby (kľúč = pôvodná cesta, hodnota = nová cesta).
+  /// Používa sa na uloženie poradia cez číselné predpony v názvoch.
+  Future<void> renameSongs(Map<String, String> renames) async {
+    if (renames.isEmpty) return;
+    final idByRelativePath = {
+      for (final entry in _cache.entries) entry.value.path: entry.key,
+    };
+
+    await Future.wait(
+      renames.entries.map((entry) async {
+        final oldRelative = _relative(entry.key);
+        final newRelative = _relative(entry.value);
+        final id =
+            idByRelativePath[oldRelative] ??
+            (await _findRelativeItem(oldRelative))['id'] as String;
+        final newName = SongRepository.basename(entry.value);
+
+        await _request(
+          'PATCH',
+          _apiUri('/files/${_segment(id)}', {'fields': 'id'}),
+          await GoogleDriveAuth.acquireToken(),
+          headers: const {'Content-Type': 'application/json'},
+          bodyBytes: utf8.encode(jsonEncode({'name': newName})),
+        );
+
+        final cached = _cache[id];
+        if (cached != null) {
+          _cache[id] = _CachedFile(
+            path: newRelative,
+            md5: cached.md5,
+            content: cached.content,
+          );
+        }
+        final checksum = _checksums.remove(entry.key);
+        if (checksum != null) _checksums[entry.value] = checksum;
+      }),
+    );
+    unawaited(_persistCache());
   }
 
   Future<void> duplicateFolder(

@@ -16,6 +16,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
 import '../services/song_display_builder.dart';
+import '../services/song_file_order.dart';
 import '../services/google_drive_repository.dart';
 import '../services/song_repository.dart';
 import '../services/word_playlist_builder.dart';
@@ -84,6 +85,7 @@ class _SongbookPageState extends State<SongbookPage> {
   bool _isLoading = false;
   bool _isSyncing = false; // obnova na pozadí, zoznam ostáva viditeľný
   bool _needsDriveLogin = false; // vypršalo prihlásenie do Google Disku
+  bool _mobileDetailOpen = false; // na mobile: otvorený detail skladby
   bool _isEditing = false;
   int _transposeSemitones = 0;
   List<String> _subfolders = [];
@@ -371,6 +373,7 @@ class _SongbookPageState extends State<SongbookPage> {
       if (mounted) {
         setState(() {
           _cloudAccount = null;
+          _mobileDetailOpen = false;
           _needsDriveLogin = false;
           _isSyncing = false;
           _folderPath = null;
@@ -646,9 +649,12 @@ class _SongbookPageState extends State<SongbookPage> {
     List<ProSongFile>? sourceSongs,
   }) {
     final from = sourceSongs ?? _songs;
-    return from
-        .where((song) => _songDirectoryRelative(song.path) == relativeDir)
-        .toList();
+    final result =
+        from
+            .where((song) => _songDirectoryRelative(song.path) == relativeDir)
+            .toList();
+    _applyCustomOrder(relativeDir, result);
+    return result;
   }
 
   String _songDirectoryRelative(String songPath) {
@@ -718,11 +724,17 @@ class _SongbookPageState extends State<SongbookPage> {
       return;
     }
 
-    setState(() {
-      _folderOrder[relativeDir] =
-          orderedSongs.map((song) => song.path).toList();
-    });
-    await _saveFolderOrder();
+    if (relativeDir.isEmpty) {
+      // Hlavný priečinok: poradie sa pamätá len v tomto zariadení.
+      setState(() {
+        _folderOrder[relativeDir] =
+            orderedSongs.map((song) => song.path).toList();
+      });
+      await _saveFolderOrder();
+    } else {
+      // Podpriečinok: poradie sa uloží do názvov súborov (01 - ..., 02 - ...).
+      await _saveFolderOrderToFiles(relativeDir, orderedSongs);
+    }
 
     final folderLabel =
         _playlistSourceTitle.isEmpty
@@ -1029,18 +1041,133 @@ class _SongbookPageState extends State<SongbookPage> {
     if (oldIndex < newIndex) {
       adjustedNewIndex -= 1;
     }
+    if (adjustedNewIndex == oldIndex) {
+      return;
+    }
 
     final updated = List<ProSongFile>.from(currentOrder);
     final moved = updated.removeAt(oldIndex);
     updated.insert(adjustedNewIndex, moved);
 
-    setState(() {
-      _folderOrder[relativeDir] = updated.map((song) => song.path).toList();
-    });
-    _saveFolderOrder();
+    unawaited(_saveFolderOrderToFiles(relativeDir, updated));
   }
 
+  String _replaceFileName(String path, String newName) {
+    final separator = math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
+    return separator < 0 ? newName : '${path.substring(0, separator + 1)}$newName';
+  }
+
+  /// Uloží poradie skladieb v podpriečinku do názvov súborov
+  /// ("01 - Názov.pro", "02 - Názov.pro", ...). Premenujú sa len súbory,
+  /// ktorým sa číslo zmenilo. Nové poradie sa zobrazí hneď.
+  Future<void> _saveFolderOrderToFiles(
+    String relativeDir,
+    List<ProSongFile> ordered,
+  ) async {
+    final width = SongFileOrder.widthFor(ordered.length);
+    final renames = <String, String>{}; // pôvodná cesta -> nová cesta
+    for (var index = 0; index < ordered.length; index++) {
+      final song = ordered[index];
+      final currentName = SongRepository.basename(song.path);
+      final targetName = SongFileOrder.withOrder(
+        currentName,
+        index + 1,
+        width: width,
+      );
+      if (targetName != currentName) {
+        renames[song.path] = _replaceFileName(song.path, targetName);
+      }
+    }
+
+    setState(() {
+      for (var i = 0; i < _songs.length; i++) {
+        final newPath = renames[_songs[i].path];
+        if (newPath == null) continue;
+        final old = _songs[i];
+        final renamed = ProSongFile(
+          path: newPath,
+          title: old.title,
+          subtitle: old.subtitle,
+          content: old.content,
+        );
+        if (_selectedSong?.path == old.path) {
+          _selectedSong = renamed;
+        }
+        _songs[i] = renamed;
+      }
+      _remapPlaylistPaths(renames);
+      _folderOrder.remove(relativeDir);
+      if (renames.isNotEmpty) {
+        _isSyncing = true;
+      }
+    });
+    if (renames.isNotEmpty) {
+      unawaited(_persistSelectedSongPath(_selectedSong?.path));
+    }
+
+    try {
+      if (kIsWeb) {
+        await GoogleDriveRepository.instance.renameSongs(renames);
+      } else {
+        for (final entry in renames.entries) {
+          await SongRepository.renameFile(entry.key, entry.value);
+        }
+      }
+      await _saveFolderOrder();
+      if (mounted) {
+        setState(() {
+          _isSyncing = false;
+        });
+      }
+    } catch (error) {
+      _showMessage('Nepodarilo sa uložiť poradie skladieb: $error');
+      // Zobraz skutočný stav z disku.
+      await _loadSongs(background: true, showErrors: false);
+    }
+  }
+
+  void _remapPlaylistPaths(Map<String, String> renames) {
+    if (renames.isEmpty) return;
+    String mapPath(String path) => renames[path] ?? path;
+    _playlistColumns = [
+      for (final column in _playlistColumns) [for (final p in column) mapPath(p)],
+    ];
+    _playlistUnassigned = [for (final p in _playlistUnassigned) mapPath(p)];
+    final selected = _playlistSelectedPaths.map(mapPath).toList();
+    _playlistSelectedPaths
+      ..clear()
+      ..addAll(selected);
+  }
+
+  /// Poradie v podpriečinkoch určujú číselné predpony v názvoch súborov
+  /// ("01 - Názov.pro"). Skladby bez predpony idú na koniec. Staré poradie
+  /// uložené len v tomto zariadení sa použije, kým priečinok nemá očíslované súbory.
   void _applyCustomOrder(String relativeDir, List<ProSongFile> songs) {
+    if (relativeDir.isNotEmpty) {
+      int? numberOf(ProSongFile song) =>
+          SongFileOrder.orderOf(SongRepository.basename(song.path));
+
+      if (songs.any((song) => numberOf(song) != null)) {
+        final original = {
+          for (var i = 0; i < songs.length; i++) songs[i].path: i,
+        };
+        songs.sort((a, b) {
+          final numberA = numberOf(a);
+          final numberB = numberOf(b);
+          if (numberA != null && numberB != null) {
+            final byNumber = numberA.compareTo(numberB);
+            if (byNumber != 0) return byNumber;
+          } else if (numberA != null) {
+            return -1;
+          } else if (numberB != null) {
+            return 1;
+          }
+          return original[a.path]!.compareTo(original[b.path]!);
+        });
+        return;
+      }
+    }
+
     final order = _folderOrder[relativeDir];
     if (order == null || order.isEmpty) {
       return;
@@ -1067,6 +1194,7 @@ class _SongbookPageState extends State<SongbookPage> {
       _isEditing = false;
       _transposeSemitones = 0;
       _editorController.text = song.content;
+      _mobileDetailOpen = true;
     });
     _persistSelectedSongPath(song.path);
     _requestHotkeysFocus();
@@ -1218,6 +1346,7 @@ class _SongbookPageState extends State<SongbookPage> {
         _selectedSong = newSong;
         _isEditing = true;
         _transposeSemitones = 0;
+        _mobileDetailOpen = true;
         _editorController.text = initialContent;
       });
       _showMessage('Nový .pro súbor bol vytvorený.');
@@ -1947,6 +2076,16 @@ class _SongbookPageState extends State<SongbookPage> {
     final viewportWidth = MediaQuery.sizeOf(context).width;
     final isCompactToolbar = viewportWidth < 1120;
     final isNarrowToolbar = viewportWidth < 600;
+    final isPhone = viewportWidth < 700;
+    final isTablet = !isPhone && viewportWidth < 1100;
+    // Na mobile sa zobrazuje buď zoznam, alebo detail skladby.
+    final showMobileDetail =
+        isPhone &&
+        _mobileDetailOpen &&
+        _selectedSong != null &&
+        _folderPath != null &&
+        !_showPlaylistBuilder &&
+        !_isLoading;
 
     return Focus(
       focusNode: _hotkeysFocusNode,
@@ -1981,19 +2120,27 @@ class _SongbookPageState extends State<SongbookPage> {
       },
       child: Scaffold(
         appBar: AppBar(
-          toolbarHeight: 76,
-          leadingWidth: isNarrowToolbar ? 132 : 170,
-          leading: Padding(
-            padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
-            child: Image.asset(
-              widget.themeMode == ThemeMode.dark
-                  ? 'chordhub biely text.png'
-                  : 'chordhub cierny text.png',
-              fit: BoxFit.fitWidth,
-              filterQuality: FilterQuality.high,
-            ),
-          ),
-          actions: [
+          toolbarHeight: isPhone ? 60 : 76,
+          leadingWidth:
+              showMobileDetail ? 56 : (isNarrowToolbar ? 120 : 170),
+          leading:
+              showMobileDetail
+                  ? IconButton(
+                    onPressed: () => setState(() => _mobileDetailOpen = false),
+                    tooltip: 'Späť na zoznam',
+                    icon: const Icon(Icons.arrow_back),
+                  )
+                  : Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 8, 6, 8),
+                    child: Image.asset(
+                      widget.themeMode == ThemeMode.dark
+                          ? 'chordhub biely text.png'
+                          : 'chordhub cierny text.png',
+                      fit: BoxFit.fitWidth,
+                      filterQuality: FilterQuality.high,
+                    ),
+                  ),
+          actions: isPhone ? _phoneAppBarActions() : [
             IconButton(
               onPressed: widget.onToggleThemeMode,
               tooltip:
@@ -2126,7 +2273,13 @@ class _SongbookPageState extends State<SongbookPage> {
             const SizedBox(width: 8),
           ],
         ),
-        body: Column(
+        body: PopScope(
+          // Tlačidlo Späť na mobile zavrie detail skladby namiesto opustenia aplikácie.
+          canPop: !showMobileDetail,
+          onPopInvokedWithResult: (didPop, result) {
+            if (!didPop) setState(() => _mobileDetailOpen = false);
+          },
+          child: Column(
           children: [
             if (_isSyncing) const LinearProgressIndicator(minHeight: 2),
             if (kIsWeb && _needsDriveLogin && _folderPath != null)
@@ -2139,9 +2292,16 @@ class _SongbookPageState extends State<SongbookPage> {
                       ? _buildFolderPrompt()
                       : _showPlaylistBuilder
                       ? _buildPlaylistBuilderPanel()
+                      : isPhone
+                      ? (showMobileDetail
+                          ? _buildSongDetailsPanel()
+                          : _buildSongListPanel())
                       : Row(
                         children: [
-                          SizedBox(width: 320, child: _buildSongListPanel()),
+                          SizedBox(
+                            width: isTablet ? 280 : 320,
+                            child: _buildSongListPanel(),
+                          ),
                           const VerticalDivider(width: 1),
                           Expanded(child: _buildSongDetailsPanel()),
                         ],
@@ -2149,8 +2309,107 @@ class _SongbookPageState extends State<SongbookPage> {
             ),
           ],
         ),
+        ),
       ),
     );
+  }
+
+  void _refreshPressed() {
+    if (kIsWeb && _needsDriveLogin) {
+      _reconnectGoogleDrive();
+    } else {
+      _loadSongs();
+    }
+  }
+
+  /// Na úzkej obrazovke je v lište len obnovenie a jedno menu so všetkým ostatným.
+  List<Widget> _phoneAppBarActions() {
+    final hasFolder = _folderPath != null;
+    return [
+      IconButton(
+        onPressed: hasFolder ? _refreshPressed : null,
+        tooltip: 'Obnoviť zoznam',
+        icon: const Icon(Icons.refresh),
+      ),
+      PopupMenuButton<String>(
+        tooltip: 'Menu',
+        onSelected: (value) {
+          switch (value) {
+            case 'new_song':
+              _createNewProSong();
+              break;
+            case 'new_folder':
+              _createSubfolder();
+              break;
+            case 'selection':
+              _toggleSelectionMode();
+              break;
+            case 'copy':
+              _showCopyToDialog();
+              break;
+            case 'folder':
+              _pickFolder();
+              break;
+            case 'theme':
+              widget.onToggleThemeMode();
+              break;
+            case 'logout':
+              _signOutGoogleDrive();
+              break;
+          }
+        },
+        itemBuilder:
+            (context) => [
+              PopupMenuItem(
+                value: 'new_song',
+                enabled: hasFolder,
+                child: const Text('Pridať akordy'),
+              ),
+              PopupMenuItem(
+                value: 'new_folder',
+                enabled: hasFolder,
+                child: const Text('Nový priečinok'),
+              ),
+              PopupMenuItem(
+                value: 'selection',
+                enabled: hasFolder,
+                child: Text(
+                  _isSelectionMode ? 'Zrušiť výber' : 'Vybrať skladby do priečinka',
+                ),
+              ),
+              if (_isSelectionMode)
+                PopupMenuItem(
+                  value: 'copy',
+                  enabled: _selectedForCopy.isNotEmpty,
+                  child: const Text('Kopírovať do priečinka'),
+                ),
+              const PopupMenuDivider(),
+              PopupMenuItem(
+                value: 'folder',
+                child: Text(
+                  kIsWeb ? 'Priečinok Google Disku' : 'Vybrať priečinok',
+                ),
+              ),
+              PopupMenuItem(
+                value: 'theme',
+                child: Text(
+                  widget.themeMode == ThemeMode.dark
+                      ? 'Svetlý režim'
+                      : 'Tmavý režim',
+                ),
+              ),
+              if (kIsWeb)
+                PopupMenuItem(
+                  value: 'logout',
+                  child: Text(
+                    _cloudAccount == null
+                        ? 'Odhlásiť Google účet'
+                        : 'Odhlásiť $_cloudAccount',
+                  ),
+                ),
+            ],
+      ),
+    ];
   }
 
   Widget _buildFolderPrompt() {
@@ -2198,10 +2457,10 @@ class _SongbookPageState extends State<SongbookPage> {
       );
     }
 
-    final desiredWidth = 328 + (_playlistRoundCount * 292);
+    final isPhone = MediaQuery.sizeOf(context).width < 700;
 
     return Padding(
-      padding: const EdgeInsets.all(16),
+      padding: EdgeInsets.all(isPhone ? 8 : 16),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -2209,8 +2468,17 @@ class _SongbookPageState extends State<SongbookPage> {
             elevation: 0,
             color: Theme.of(context).colorScheme.surfaceContainerHighest,
             child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Wrap(
+              padding: EdgeInsets.all(isPhone ? 10 : 16),
+              child: ConstrainedBox(
+                // Na mobile hlavička nezaberie celú obrazovku, dá sa v nej rolovať.
+                constraints: BoxConstraints(
+                  maxHeight:
+                      isPhone
+                          ? MediaQuery.sizeOf(context).height * 0.3
+                          : double.infinity,
+                ),
+                child: SingleChildScrollView(
+                  child: Wrap(
                 spacing: 16,
                 runSpacing: 12,
                 crossAxisAlignment: WrapCrossAlignment.center,
@@ -2312,16 +2580,24 @@ class _SongbookPageState extends State<SongbookPage> {
                   ),
                 ],
               ),
+                ),
+              ),
             ),
           ),
           const SizedBox(height: 16),
           Expanded(
             child: LayoutBuilder(
               builder: (context, constraints) {
-                final width = math.max(
-                  constraints.maxWidth,
-                  desiredWidth.toDouble(),
-                );
+                final narrow = constraints.maxWidth < 700;
+                final unassignedWidth =
+                    narrow ? math.min(316.0, constraints.maxWidth * 0.85) : 316.0;
+                final roundWidth =
+                    narrow ? math.min(280.0, constraints.maxWidth * 0.8) : 280.0;
+                final neededWidth =
+                    unassignedWidth +
+                    12 +
+                    _playlistRoundCount * (roundWidth + 12);
+                final width = math.max(constraints.maxWidth, neededWidth);
 
                 return Scrollbar(
                   controller: _playlistHorizontalScrollController,
@@ -2336,7 +2612,7 @@ class _SongbookPageState extends State<SongbookPage> {
                         crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: [
                           SizedBox(
-                            width: 316,
+                            width: unassignedWidth,
                             child: _buildPlaylistBucket(
                               title: 'Nezaradené skladby',
                               subtitle: 'Potiahni ich do jednotlivých kôl',
@@ -2354,7 +2630,7 @@ class _SongbookPageState extends State<SongbookPage> {
                             index++
                           ) ...[
                             SizedBox(
-                              width: 280,
+                              width: roundWidth,
                               child: _buildPlaylistBucket(
                                 title: 'Kolo ${index + 1}',
                                 subtitle: 'Zoradenie pre toto kolo',
@@ -3574,14 +3850,16 @@ class _SongbookPageState extends State<SongbookPage> {
       if (!targetDir.existsSync()) {
         targetDir.createSync(recursive: true);
       }
-      final targetPath = '$targetDirPath$_pathSeparator$fileName';
-      var finalTarget = targetPath;
-      var counter = 1;
-      while (File(finalTarget).existsSync()) {
-        finalTarget =
-            '$targetDirPath$_pathSeparator${SongRepository.basenameWithoutExtension(fileName)}_copy$counter${fileName.substring(fileName.lastIndexOf('.'))}';
-        counter++;
-      }
+      // V podpriečinku s očíslovanými skladbami sa kópia zaradí na koniec.
+      final finalName = SongFileOrder.nameForCopy(
+        sourceFileName: fileName,
+        targetIsSubfolder: safeRel.isNotEmpty,
+        existingNames: [
+          for (final entity in targetDir.listSync())
+            if (entity is File) SongRepository.basename(entity.path),
+        ],
+      );
+      final finalTarget = '$targetDirPath$_pathSeparator$finalName';
       await file.copy(finalTarget);
       await _loadSongs(preferredSongPath: finalTarget);
       _showMessage('Súbor skopírovaný.');
@@ -3682,15 +3960,16 @@ class _SongbookPageState extends State<SongbookPage> {
       if (!targetDir.existsSync()) {
         targetDir.createSync(recursive: true);
       }
-      final targetPath = '$targetDirPath$_pathSeparator$fileName';
-      // If file exists, append suffix
-      var finalTarget = targetPath;
-      var counter = 1;
-      while (File(finalTarget).existsSync()) {
-        finalTarget =
-            '$targetDirPath$_pathSeparator${SongRepository.basenameWithoutExtension(fileName)}_copy$counter${fileName.substring(fileName.lastIndexOf('.'))}';
-        counter++;
-      }
+      // V podpriečinku s očíslovanými skladbami sa kópia zaradí na koniec.
+      final finalName = SongFileOrder.nameForCopy(
+        sourceFileName: fileName,
+        targetIsSubfolder: safeRel.isNotEmpty,
+        existingNames: [
+          for (final entity in targetDir.listSync())
+            if (entity is File) SongRepository.basename(entity.path),
+        ],
+      );
+      final finalTarget = '$targetDirPath$_pathSeparator$finalName';
       await file.copy(finalTarget);
     } catch (e) {
       _showMessage('Nepodarilo sa skopírovať súbor: $e');
@@ -3709,145 +3988,226 @@ class _SongbookPageState extends State<SongbookPage> {
     );
     final displayLines = SongDisplayBuilder.build(parsedSong.lines);
 
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Row(
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      parsedSong.title,
-                      style: Theme.of(context).textTheme.headlineSmall,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                    if (parsedSong.subtitle != null)
-                      Text(
-                        parsedSong.subtitle!,
-                        style: Theme.of(context).textTheme.titleSmall,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                  ],
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // wide: všetko v jednom riadku, medium: tlačidlá pod názvom,
+        // compact: tlačidlá bez popisov a menšie písmo pre mobil.
+        final wide = constraints.maxWidth >= 980;
+        final compact = constraints.maxWidth < 560;
+
+        final titleBlock = Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              parsedSong.title,
+              style: Theme.of(context).textTheme.headlineSmall,
+              maxLines: wide ? 1 : 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+            if (parsedSong.subtitle != null)
+              Text(
+                parsedSong.subtitle!,
+                style: Theme.of(context).textTheme.titleSmall,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+          ],
+        );
+
+        final transposeControls = Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              onPressed: () => _changeTransposeBy(-1),
+              tooltip: 'Transpozícia -1',
+              icon: const Icon(Icons.remove),
+            ),
+            Text('$_transposeSemitones'),
+            IconButton(
+              onPressed: () => _changeTransposeBy(1),
+              tooltip: 'Transpozícia +1',
+              icon: const Icon(Icons.add),
+            ),
+            TextButton(
+              onPressed: () {
+                setState(() {
+                  _transposeSemitones = 0;
+                });
+              },
+              child: const Text('Reset'),
+            ),
+          ],
+        );
+
+        final VoidCallback? saveTranspositionAction =
+            _isEditing || _transposeSemitones == 0
+                ? null
+                : _saveCurrentTransposition;
+        final VoidCallback? printAction = _isEditing ? null : _printCurrentSong;
+
+        final actions = <Widget>[
+          transposeControls,
+          if (compact)
+            IconButton(
+              onPressed: saveTranspositionAction,
+              tooltip: 'Uložiť transpozíciu',
+              icon: const Icon(Icons.save_as),
+            )
+          else
+            TextButton.icon(
+              onPressed: saveTranspositionAction,
+              icon: const Icon(Icons.save_as),
+              label: const Text('Uložiť transpozíciu'),
+            ),
+          if (compact)
+            IconButton(
+              onPressed: printAction,
+              tooltip: 'Tlačiť',
+              icon: const Icon(Icons.print),
+            )
+          else
+            TextButton.icon(
+              onPressed: printAction,
+              icon: const Icon(Icons.print),
+              label: const Text('Tlačiť'),
+            ),
+          IconButton(
+            onPressed:
+                _isEditing
+                    ? null
+                    : () => _openPerformanceMode(parsedSong, displayLines),
+            tooltip: 'Zobraziť na celej obrazovke',
+            icon: const Icon(Icons.fullscreen),
+          ),
+          if (_isEditing)
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: _transformEditorToChordPro,
+                  icon: const Icon(Icons.auto_fix_high),
+                  label: const Text('Na ChordPro'),
                 ),
-              ),
-              const SizedBox(width: 12),
-              IconButton(
-                onPressed: () => _changeTransposeBy(-1),
-                tooltip: 'Transpozícia -1',
-                icon: const Icon(Icons.remove),
-              ),
-              Text('$_transposeSemitones'),
-              IconButton(
-                onPressed: () => _changeTransposeBy(1),
-                tooltip: 'Transpozícia +1',
-                icon: const Icon(Icons.add),
-              ),
-              TextButton(
-                onPressed: () {
-                  setState(() {
-                    _transposeSemitones = 0;
-                  });
-                },
-                child: const Text('Reset'),
-              ),
-              TextButton.icon(
-                onPressed:
-                    _isEditing || _transposeSemitones == 0
-                        ? null
-                        : _saveCurrentTransposition,
-                icon: const Icon(Icons.save_as),
-                label: const Text('Uložiť transpozíciu'),
-              ),
-              TextButton.icon(
-                onPressed: _isEditing ? null : _printCurrentSong,
-                icon: const Icon(Icons.print),
-                label: const Text('Tlačiť'),
-              ),
-              IconButton(
-                onPressed:
-                    _isEditing
-                        ? null
-                        : () => _openPerformanceMode(parsedSong, displayLines),
-                tooltip: 'Zobraziť na celej obrazovke',
-                icon: const Icon(Icons.fullscreen),
-              ),
-              const SizedBox(width: 8),
-              if (_isEditing)
-                Row(
-                  mainAxisSize: MainAxisSize.min,
+                const SizedBox(width: 8),
+                FilledButton.icon(
+                  onPressed: _saveCurrentSong,
+                  icon: const Icon(Icons.save),
+                  label: const Text('Uložiť'),
+                ),
+              ],
+            )
+          else
+            OutlinedButton.icon(
+              onPressed: () {
+                setState(() {
+                  _isEditing = true;
+                  _editorController.text = selectedSong.content;
+                });
+              },
+              icon: const Icon(Icons.edit),
+              label: const Text('Upraviť'),
+            ),
+        ];
+
+        final header =
+            wide
+                ? Row(
                   children: [
-                    OutlinedButton.icon(
-                      onPressed: _transformEditorToChordPro,
-                      icon: const Icon(Icons.auto_fix_high),
-                      label: const Text('Na ChordPro'),
-                    ),
+                    Expanded(child: titleBlock),
+                    const SizedBox(width: 12),
+                    ...actions,
                     const SizedBox(width: 8),
-                    FilledButton.icon(
-                      onPressed: _saveCurrentSong,
-                      icon: const Icon(Icons.save),
-                      label: const Text('Uložiť'),
-                    ),
                   ],
                 )
-              else
-                OutlinedButton.icon(
-                  onPressed: () {
-                    setState(() {
-                      _isEditing = true;
-                      _editorController.text = selectedSong.content;
-                    });
-                  },
-                  icon: const Icon(Icons.edit),
-                  label: const Text('Upraviť'),
-                ),
+                : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    titleBlock,
+                    const SizedBox(height: 8),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: actions,
+                    ),
+                  ],
+                );
+
+        final fontScale = compact ? 0.85 : 1.0;
+        Widget buildPreviewList() => ListView.builder(
+          controller: _previewScrollController,
+          itemCount: displayLines.length,
+          itemBuilder: (context, index) {
+            final line = displayLines[index];
+            return ChordLineView(
+              line: line.rawLine,
+              inChorus: line.isChorus,
+              transposeSemitones: _transposeSemitones,
+              fontScale: fontScale,
+            );
+          },
+        );
+
+        Widget preview;
+        if (compact) {
+          // Riadky sa nezalamujú (akordy sú nad textom), preto sa na úzkej
+          // obrazovke dá preview posúvať aj do strán.
+          final longestLine = displayLines.fold<int>(
+            0,
+            (longest, line) => math.max(longest, line.rawLine.length),
+          );
+          final estimatedWidth = longestLine * 14 * fontScale * 0.62 + 24;
+          preview = LayoutBuilder(
+            builder: (context, box) {
+              final contentWidth = math.max(box.maxWidth, estimatedWidth);
+              return SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: SizedBox(width: contentWidth, child: buildPreviewList()),
+              );
+            },
+          );
+        } else {
+          preview = buildPreviewList();
+        }
+
+        return Padding(
+          padding: EdgeInsets.all(compact ? 8 : 16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              header,
+              const SizedBox(height: 12),
+              Expanded(
+                child:
+                    _isEditing
+                        ? TextField(
+                          controller: _editorController,
+                          expands: true,
+                          maxLines: null,
+                          minLines: null,
+                          decoration: const InputDecoration(
+                            border: OutlineInputBorder(),
+                            alignLabelWithHint: true,
+                            labelText: 'ChordPro obsah',
+                          ),
+                          style: const TextStyle(fontFamily: 'monospace'),
+                        )
+                        : Container(
+                          decoration: BoxDecoration(
+                            border: Border.all(
+                              color:
+                                  Theme.of(context).colorScheme.outlineVariant,
+                            ),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          padding: EdgeInsets.all(compact ? 8 : 12),
+                          child: preview,
+                        ),
+              ),
             ],
           ),
-          const SizedBox(height: 12),
-          Expanded(
-            child:
-                _isEditing
-                    ? TextField(
-                      controller: _editorController,
-                      expands: true,
-                      maxLines: null,
-                      minLines: null,
-                      decoration: const InputDecoration(
-                        border: OutlineInputBorder(),
-                        alignLabelWithHint: true,
-                        labelText: 'ChordPro obsah',
-                      ),
-                      style: const TextStyle(fontFamily: 'monospace'),
-                    )
-                    : Container(
-                      decoration: BoxDecoration(
-                        border: Border.all(
-                          color: Theme.of(context).colorScheme.outlineVariant,
-                        ),
-                        borderRadius: BorderRadius.circular(8),
-                      ),
-                      padding: const EdgeInsets.all(12),
-                      child: ListView.builder(
-                        controller: _previewScrollController,
-                        itemCount: displayLines.length,
-                        itemBuilder: (context, index) {
-                          final line = displayLines[index];
-                          return ChordLineView(
-                            line: line.rawLine,
-                            inChorus: line.isChorus,
-                            transposeSemitones: _transposeSemitones,
-                          );
-                        },
-                      ),
-                    ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }

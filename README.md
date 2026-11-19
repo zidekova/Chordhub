@@ -56,3 +56,13 @@ Presná produkčná adresa (origin) musí byť pridaná v Google Cloud Console. 
 
 Naposledy načítaný zoznam sa ukladá v prehliadači. Po otvorení aplikácie sa zobrazí hneď a na pozadí sa aktualizuje; z Google Disku sa sťahujú iba skladby, ktoré sa zmenili. Prístupový token Google platí približne hodinu a bez kliknutia ho prehliadač nepustí obnoviť. Ak vyprší, zobrazí sa hore pruh **Prihlásiť sa** a zoznam ostane viditeľný. Po odhlásení sa uložený zoznam zmaže.
 
+### Poradie skladieb v podpriečinkoch
+
+Keď v podpriečinku presunieš skladbu (alebo uložíš poradie z tvorby playlistu), poradie sa uloží do názvov súborov pomocou číselnej predpony, napr. `01 - Aleluja.pro`, `02 - Amazing Grace.pro`. Vďaka tomu je poradie rovnaké na každom zariadení a na Google Disku. Predpona sa v aplikácii nezobrazuje a nemení názov skladby. Skladby bez predpony idú na koniec. Kópia skladby do už očíslovaného podpriečinka sa zaradí na koniec. Hlavný priečinok sa tým nemení, jeho poradie sa naďalej pamätá len v danom zariadení.
+
+### Mobil a tablet
+
+- **Mobil** (užšie ako 700 px): zobrazí sa zoznam skladieb a po kliknutí na skladbu jej detail s tlačidlom Späť. Ostatné akcie sú v menu `⋮`.
+- **Tablet** (700 až 1100 px): zoznam a detail vedľa seba, tlačidlá detailu sa zalomia pod názov.
+- **Počítač**: pôvodné rozloženie.
+
