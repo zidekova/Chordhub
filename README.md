@@ -65,7 +65,7 @@ Keď v podpriečinku presunieš skladbu (alebo uložíš poradie z tvorby playli
 - **Mobil** (užšie ako 700 px): zobrazí sa zoznam skladieb a po kliknutí na skladbu jej detail s tlačidlom Späť. Ostatné akcie sú v menu `⋮`.
 - **Tablet** (700 až 1100 px): zoznam a detail vedľa seba, tlačidlá detailu sa zalomia pod názov.
 - **Počítač**: pôvodné rozloženie.
-- **Fullscreen na mobile a tablete:** otvorí sa dvojklikom na skladbu. Vo fullscreene jedno klepnutie pozastaví alebo znovu spustí scrollovanie. Na mobile sú transpozícia a rýchlosť v paneli pod tlačidlom `tune`.
+- **Fullscreen na mobile a tablete:** otvorí sa dvojklikom na skladbu. Vo fullscreene jedno klepnutie pozastaví alebo znovu spustí scrollovanie. Na mobile sú transpozícia, veľkosť textu a rýchlosť v paneli pod tlačidlom `tune`. Text sa dá zväčšiť štiepením prstami (alebo tlačidlami). Nastavená veľkosť sa pamätá aj pre ďalšie skladby. Ak je najdlhší riadok po zväčšení širší než displej, skladba sa dá posúvať aj do strán.
 
 ### Pevne daný priečinok
 

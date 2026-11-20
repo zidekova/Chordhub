@@ -4,6 +4,7 @@ import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/song.dart';
 import '../widgets/chord_line_view.dart';
@@ -43,11 +44,29 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
   bool _feedbackVisible = false;
   IconData _feedbackIcon = Icons.pause;
 
+  // Vlastné priblíženie textu (štiepenie prstami alebo tlačidlá). Násobí sa
+  // s automatickou veľkosťou a pamätá si sa aj pre ďalšie skladby.
+  static const String _prefZoom = 'performance_font_zoom';
+  static const double _minZoom = 0.6;
+  static const double _maxZoom = 3.5;
+  double _zoom = 1.0;
+  final Map<int, Offset> _pointers = {};
+  double _pinchStartDistance = 0;
+  double _pinchStartZoom = 1.0;
+  bool _pinching = false;
+  DateTime? _lastPinchAt;
+
+  // Automatická veľkosť sa prepočíta len pri zmene rozmerov alebo transpozície.
+  String? _autoKey;
+  double _autoScale = 1.0;
+  double _maxLineWidthAt1 = 0;
+
   @override
   void initState() {
     super.initState();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
     _scrollSpeedPixelsPerSecond = widget.initialScrollSpeedPixelsPerSecond;
+    _loadZoom();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) {
         return;
@@ -115,8 +134,107 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
     _startAutoScroll();
   }
 
+  Future<void> _loadZoom() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final stored = prefs.getDouble(_prefZoom);
+      if (stored != null && mounted) {
+        setState(() {
+          _zoom = stored.clamp(_minZoom, _maxZoom).toDouble();
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _saveZoom() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble(_prefZoom, _zoom);
+    } catch (_) {}
+  }
+
+  /// Nastaví priblíženie a udrží zhruba rovnaké miesto v skladbe.
+  void _applyZoom(double newZoom) {
+    final clamped = newZoom.clamp(_minZoom, _maxZoom).toDouble();
+    final oldZoom = _zoom;
+    if (clamped == oldZoom) return;
+    setState(() {
+      _zoom = clamped;
+    });
+    final ratio = clamped / oldZoom;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_scrollController.hasClients) return;
+      final position = _scrollController.position;
+      position.jumpTo(
+        (position.pixels * ratio).clamp(
+          position.minScrollExtent,
+          position.maxScrollExtent,
+        ),
+      );
+    });
+  }
+
+  void _zoomBy(double factor) {
+    _applyZoom(_zoom * factor);
+    _saveZoom();
+  }
+
+  void _resetZoom() {
+    _applyZoom(1.0);
+    _saveZoom();
+  }
+
+  double _pinchDistance() {
+    final points = _pointers.values.toList();
+    return (points[0] - points[1]).distance;
+  }
+
+  void _onPointerDown(PointerDownEvent event) {
+    _userTouching = true;
+    _pointers[event.pointer] = event.position;
+    if (_pointers.length == 2) {
+      _pinchStartDistance = _pinchDistance();
+      _pinchStartZoom = _zoom;
+      setState(() {
+        _pinching = true;
+      });
+    }
+  }
+
+  void _onPointerMove(PointerMoveEvent event) {
+    if (!_pointers.containsKey(event.pointer)) return;
+    _pointers[event.pointer] = event.position;
+    if (_pointers.length == 2 && _pinchStartDistance > 0) {
+      _applyZoom(_pinchStartZoom * (_pinchDistance() / _pinchStartDistance));
+    }
+  }
+
+  void _onPointerEnd(PointerEvent event) {
+    final wasPinching = _pointers.length >= 2;
+    _pointers.remove(event.pointer);
+    if (wasPinching) {
+      _lastPinchAt = DateTime.now();
+      _saveZoom();
+      if (_pinching) {
+        setState(() {
+          _pinching = false;
+        });
+      }
+    }
+    if (_pointers.isEmpty) {
+      _userTouching = false;
+    }
+  }
+
   /// Jedno klepnutie na skladbu pozastaví alebo znovu spustí scrollovanie.
   void _onBodyTap() {
+    // Po štiepení prstami nespúšťaj pauzu.
+    final lastPinch = _lastPinchAt;
+    if (lastPinch != null &&
+        DateTime.now().difference(lastPinch) <
+            const Duration(milliseconds: 400)) {
+      return;
+    }
     _toggleAutoScroll();
     setState(() {
       _feedbackIcon = _isAutoScrolling ? Icons.play_arrow : Icons.pause;
@@ -184,6 +302,40 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
                                     _transposeSemitones = 0;
                                   });
                                 }),
+                            child: const Text('Reset'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 16),
+                      Text(
+                        'Veľkosť textu (aj štiepením prstami)',
+                        style: textTheme.titleSmall,
+                      ),
+                      const SizedBox(height: 4),
+                      Row(
+                        children: [
+                          IconButton.filledTonal(
+                            onPressed: () => update(() => _zoomBy(1 / 1.15)),
+                            tooltip: 'Zmenšiť text',
+                            icon: const Icon(Icons.text_decrease),
+                          ),
+                          SizedBox(
+                            width: 72,
+                            child: Center(
+                              child: Text(
+                                '${(_zoom * 100).round()} %',
+                                style: textTheme.titleMedium,
+                              ),
+                            ),
+                          ),
+                          IconButton.filledTonal(
+                            onPressed: () => update(() => _zoomBy(1.15)),
+                            tooltip: 'Zväčšiť text',
+                            icon: const Icon(Icons.text_increase),
+                          ),
+                          const Spacer(),
+                          TextButton(
+                            onPressed: () => update(_resetZoom),
                             child: const Text('Reset'),
                           ),
                         ],
@@ -296,6 +448,20 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
     BoxConstraints constraints,
     List<SongDisplayLine> lines,
   ) {
+    final key =
+        '${constraints.maxWidth.round()}x${constraints.maxHeight.round()}'
+        '|$_transposeSemitones';
+    if (key != _autoKey) {
+      _autoScale = _computeAutoScale(constraints, lines);
+      _autoKey = key;
+    }
+    return _autoScale;
+  }
+
+  double _computeAutoScale(
+    BoxConstraints constraints,
+    List<SongDisplayLine> lines,
+  ) {
     const baseFontSize = 14.0;
     final lyricStyle = const TextStyle(
       fontFamily: 'monospace',
@@ -331,11 +497,14 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
       maxLineWidth = math.max(maxLineWidth, lineWidth);
     }
 
+    _maxLineWidthAt1 = maxLineWidth;
     if (maxLineWidth <= 1) {
       return 1.0;
     }
 
-    final widthByContent = (constraints.maxWidth - 44) / (maxLineWidth + 12);
+    final reservedWidth = constraints.maxWidth < 700 ? 28.0 : 44.0;
+    final widthByContent =
+        (constraints.maxWidth - reservedWidth) / (maxLineWidth + 12);
     final heightBoost = (constraints.maxHeight / 900).clamp(1.0, 1.35);
     final scale = widthByContent * 0.95 * heightBoost;
     return scale.clamp(0.55, 2.8);
@@ -432,6 +601,18 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
                     tooltip: 'Uložiť rýchlosť scrollovania do piesne',
                     icon: const Icon(Icons.save_outlined),
                   ),
+                  if (width >= 900) ...[
+                    IconButton(
+                      onPressed: () => _zoomBy(1 / 1.15),
+                      tooltip: 'Zmenšiť text',
+                      icon: const Icon(Icons.text_decrease),
+                    ),
+                    IconButton(
+                      onPressed: () => _zoomBy(1.15),
+                      tooltip: 'Zväčšiť text',
+                      icon: const Icon(Icons.text_increase),
+                    ),
+                  ],
                   playPauseButton,
                   if (useCompactActions)
                     IconButton(
@@ -457,10 +638,39 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
       ),
       body: LayoutBuilder(
         builder: (context, constraints) {
-          final fontScale = _fontScaleForSingleColumn(
+          final autoScale = _fontScaleForSingleColumn(
             constraints,
             widget.displayLines,
           );
+          final fontScale = (autoScale * _zoom).clamp(0.3, 6.0).toDouble();
+          final sidePadding = constraints.maxWidth < 700 ? 8.0 : 16.0;
+
+          // Po priblížení môže byť najdlhší riadok širší než displej:
+          // vtedy sa skladba dá posúvať aj do strán.
+          final contentWidth =
+              (_maxLineWidthAt1 + 12) * fontScale + 2 * sidePadding + 8;
+          Widget songList = ListView.builder(
+            controller: _scrollController,
+            physics: _pinching ? const NeverScrollableScrollPhysics() : null,
+            padding: EdgeInsets.fromLTRB(sidePadding, 16, sidePadding, 32),
+            itemCount: widget.displayLines.length,
+            itemBuilder: (context, index) {
+              final line = widget.displayLines[index];
+              return ChordLineView(
+                line: line.rawLine,
+                inChorus: line.isChorus,
+                transposeSemitones: _transposeSemitones,
+                fontScale: fontScale,
+              );
+            },
+          );
+          if (contentWidth > constraints.maxWidth + 1) {
+            songList = SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              physics: _pinching ? const NeverScrollableScrollPhysics() : null,
+              child: SizedBox(width: contentWidth, child: songList),
+            );
+          }
 
           return Focus(
             autofocus: true,
@@ -511,26 +721,14 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
                 // Prst na displeji pozastaví automatický posun, aby sa
                 // nebil s ručným posúvaním. Jedno klepnutie ho zastaví/spustí.
                 Listener(
-                  onPointerDown: (_) => _userTouching = true,
-                  onPointerUp: (_) => _userTouching = false,
-                  onPointerCancel: (_) => _userTouching = false,
+                  onPointerDown: _onPointerDown,
+                  onPointerMove: _onPointerMove,
+                  onPointerUp: _onPointerEnd,
+                  onPointerCancel: _onPointerEnd,
                   child: GestureDetector(
                     behavior: HitTestBehavior.opaque,
                     onTap: _onBodyTap,
-                    child: ListView.builder(
-                      controller: _scrollController,
-                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 32),
-                      itemCount: widget.displayLines.length,
-                      itemBuilder: (context, index) {
-                        final line = widget.displayLines[index];
-                        return ChordLineView(
-                          line: line.rawLine,
-                          inChorus: line.isChorus,
-                          transposeSemitones: _transposeSemitones,
-                          fontScale: fontScale,
-                        );
-                      },
-                    ),
+                    child: songList,
                   ),
                 ),
                 Center(
