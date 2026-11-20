@@ -53,6 +53,28 @@ class _SongbookPageState extends State<SongbookPage> {
         '794458736034-mu7ghlmkspm2n931h04esfc450f92cst.apps.googleusercontent.com',
   );
 
+  // Pevne daný priečinok so skladbami na Google Disku (odkaz na priečinok).
+  // Po vyplnení sa používateľ len prihlási a odkaz už nezadáva. Priečinok musí
+  // byť zdieľaný ako "Každý, kto má odkaz". Pri prázdnej hodnote sa odkaz pýta
+  // ako predtým. Dá sa zadať aj cez --dart-define=DRIVE_FOLDER_URL=...
+  static const String _fixedDriveFolderUrl = String.fromEnvironment(
+    'DRIVE_FOLDER_URL',
+    defaultValue:
+        'https://drive.google.com/drive/folders/14rkqNiABz2MediqhVbh-X_3yXa4muaZA?usp=sharing',
+  );
+
+  bool get _hasFixedFolder => kIsWeb && _fixedDriveFolderUrl.isNotEmpty;
+
+  String _folderActionLabel() =>
+      _hasFixedFolder
+          ? 'Prihlásiť sa'
+          : (kIsWeb ? 'Priečinok Google Disku' : 'Vybrať priečinok');
+
+  String? _configuredFolderUrl(SharedPreferences prefs) =>
+      _hasFixedFolder
+          ? _fixedDriveFolderUrl
+          : prefs.getString(_prefDriveFolderUrl);
+
   final TextEditingController _editorController = TextEditingController();
   final FocusNode _hotkeysFocusNode = FocusNode();
   final ScrollController _previewScrollController = ScrollController();
@@ -111,7 +133,7 @@ class _SongbookPageState extends State<SongbookPage> {
   Future<void> _restoreSession() async {
     final prefs = await SharedPreferences.getInstance();
     if (kIsWeb) {
-      final sharingUrl = prefs.getString(_prefDriveFolderUrl);
+      final sharingUrl = _configuredFolderUrl(prefs);
       if (sharingUrl == null || sharingUrl.isEmpty || _googleClientId.isEmpty) {
         return;
       }
@@ -250,13 +272,18 @@ class _SongbookPageState extends State<SongbookPage> {
       if (_cloudAccount == null) return;
 
       final prefs = await SharedPreferences.getInstance();
-      final sharingUrl = await _showDriveUrlDialog(
-        initialValue: prefs.getString(_prefDriveFolderUrl),
-      );
+      final sharingUrl =
+          _hasFixedFolder
+              ? _fixedDriveFolderUrl
+              : await _showDriveUrlDialog(
+                initialValue: prefs.getString(_prefDriveFolderUrl),
+              );
       if (sharingUrl == null || sharingUrl.isEmpty) return;
 
       final root = await repository.openSharedFolder(sharingUrl);
-      await prefs.setString(_prefDriveFolderUrl, sharingUrl);
+      if (!_hasFixedFolder) {
+        await prefs.setString(_prefDriveFolderUrl, sharingUrl);
+      }
       if (!mounted) return;
 
       setState(() {
@@ -276,6 +303,8 @@ class _SongbookPageState extends State<SongbookPage> {
       _showMessage(
         account == null
             ? 'Nepodarilo sa pripojiť Google Disk: $error'
+            : _hasFixedFolder
+            ? 'Google Disk odmietol prístup pre účet $account. Skontroluj, že je priečinok zdieľaný ako "Každý, kto má odkaz". ($error)'
             : 'Google Disk odmietol prístup pre účet $account. Odhlás sa a použi účet, s ktorým je priečinok zdieľaný. Skontroluj, že má oprávnenie na úpravy. ($error)',
       );
     }
@@ -297,7 +326,7 @@ class _SongbookPageState extends State<SongbookPage> {
       if (account != null) _cloudAccount = account;
 
       final prefs = await SharedPreferences.getInstance();
-      final sharingUrl = prefs.getString(_prefDriveFolderUrl);
+      final sharingUrl = _configuredFolderUrl(prefs);
       if (sharingUrl == null || sharingUrl.isEmpty) {
         if (mounted) setState(() => _needsDriveLogin = false);
         return;
@@ -1054,7 +1083,9 @@ class _SongbookPageState extends State<SongbookPage> {
 
   String _replaceFileName(String path, String newName) {
     final separator = math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'));
-    return separator < 0 ? newName : '${path.substring(0, separator + 1)}$newName';
+    return separator < 0
+        ? newName
+        : '${path.substring(0, separator + 1)}$newName';
   }
 
   /// Uloží poradie skladieb v podpriečinku do názvov súborov
@@ -1130,7 +1161,8 @@ class _SongbookPageState extends State<SongbookPage> {
     if (renames.isEmpty) return;
     String mapPath(String path) => renames[path] ?? path;
     _playlistColumns = [
-      for (final column in _playlistColumns) [for (final p in column) mapPath(p)],
+      for (final column in _playlistColumns)
+        [for (final p in column) mapPath(p)],
     ];
     _playlistUnassigned = [for (final p in _playlistUnassigned) mapPath(p)];
     final selected = _playlistSelectedPaths.map(mapPath).toList();
@@ -2121,8 +2153,7 @@ class _SongbookPageState extends State<SongbookPage> {
       child: Scaffold(
         appBar: AppBar(
           toolbarHeight: isPhone ? 60 : 76,
-          leadingWidth:
-              showMobileDetail ? 56 : (isNarrowToolbar ? 120 : 170),
+          leadingWidth: showMobileDetail ? 56 : (isNarrowToolbar ? 120 : 170),
           leading:
               showMobileDetail
                   ? IconButton(
@@ -2140,138 +2171,157 @@ class _SongbookPageState extends State<SongbookPage> {
                       filterQuality: FilterQuality.high,
                     ),
                   ),
-          actions: isPhone ? _phoneAppBarActions() : [
-            IconButton(
-              onPressed: widget.onToggleThemeMode,
-              tooltip:
-                  widget.themeMode == ThemeMode.dark
-                      ? 'Prepnúť na svetlý režim'
-                      : 'Prepnúť na tmavý režim',
-              icon: Icon(
-                widget.themeMode == ThemeMode.dark
-                    ? Icons.light_mode
-                    : Icons.dark_mode,
-              ),
-            ),
-            if (isNarrowToolbar)
-              IconButton(
-                onPressed: _pickFolder,
-                tooltip: kIsWeb ? 'Priečinok Google Disku' : 'Vybrať priečinok',
-                icon: const Icon(Icons.folder_open),
-              )
-            else
-              TextButton.icon(
-                onPressed: _pickFolder,
-                icon: const Icon(Icons.folder_open),
-                label: Text(
-                  isCompactToolbar
-                      ? (kIsWeb ? 'Google Disk' : 'Priečinok')
-                      : (kIsWeb
-                          ? 'Priečinok Google Disku'
-                          : 'Vybrať priečinok'),
-                ),
-              ),
-            if (kIsWeb)
-              IconButton(
-                onPressed: _signOutGoogleDrive,
-                tooltip:
-                    _cloudAccount == null
-                        ? 'Odhlásiť Google účet'
-                        : 'Odhlásiť $_cloudAccount',
-                icon: const Icon(Icons.logout),
-              ),
-            if (isCompactToolbar)
-              PopupMenuButton<String>(
-                tooltip: 'Akcie',
-                onSelected: (value) {
-                  switch (value) {
-                    case 'new_song':
-                      _createNewProSong();
-                      break;
-                    case 'new_folder':
-                      _createSubfolder();
-                      break;
-                    case 'selection':
-                      _toggleSelectionMode();
-                      break;
-                    case 'copy':
-                      _showCopyToDialog();
-                      break;
-                  }
-                },
-                itemBuilder:
-                    (context) => [
-                      PopupMenuItem(
-                        value: 'new_song',
-                        enabled: _folderPath != null,
-                        child: const Text('Pridať akordy'),
+          actions:
+              isPhone
+                  ? _phoneAppBarActions()
+                  : [
+                    IconButton(
+                      onPressed: widget.onToggleThemeMode,
+                      tooltip:
+                          widget.themeMode == ThemeMode.dark
+                              ? 'Prepnúť na svetlý režim'
+                              : 'Prepnúť na tmavý režim',
+                      icon: Icon(
+                        widget.themeMode == ThemeMode.dark
+                            ? Icons.light_mode
+                            : Icons.dark_mode,
                       ),
-                      PopupMenuItem(
-                        value: 'new_folder',
-                        enabled: _folderPath != null,
-                        child: const Text('Nový priečinok'),
+                    ),
+                    // S pevne daným priečinkom je tlačidlo len na prihlásenie a po
+                    // pripojení sa skryje.
+                    if (!(_hasFixedFolder && _folderPath != null))
+                      if (isNarrowToolbar)
+                        IconButton(
+                          onPressed: _pickFolder,
+                          tooltip: _folderActionLabel(),
+                          icon: Icon(
+                            _hasFixedFolder ? Icons.login : Icons.folder_open,
+                          ),
+                        )
+                      else
+                        TextButton.icon(
+                          onPressed: _pickFolder,
+                          icon: Icon(
+                            _hasFixedFolder ? Icons.login : Icons.folder_open,
+                          ),
+                          label: Text(
+                            _hasFixedFolder
+                                ? 'Prihlásiť sa'
+                                : (isCompactToolbar
+                                    ? (kIsWeb ? 'Google Disk' : 'Priečinok')
+                                    : (kIsWeb
+                                        ? 'Priečinok Google Disku'
+                                        : 'Vybrať priečinok')),
+                          ),
+                        ),
+                    if (kIsWeb)
+                      IconButton(
+                        onPressed: _signOutGoogleDrive,
+                        tooltip:
+                            _cloudAccount == null
+                                ? 'Odhlásiť Google účet'
+                                : 'Odhlásiť $_cloudAccount',
+                        icon: const Icon(Icons.logout),
                       ),
-                      PopupMenuItem(
-                        value: 'selection',
-                        enabled: _folderPath != null,
-                        child: Text(
+                    if (isCompactToolbar)
+                      PopupMenuButton<String>(
+                        tooltip: 'Akcie',
+                        onSelected: (value) {
+                          switch (value) {
+                            case 'new_song':
+                              _createNewProSong();
+                              break;
+                            case 'new_folder':
+                              _createSubfolder();
+                              break;
+                            case 'selection':
+                              _toggleSelectionMode();
+                              break;
+                            case 'copy':
+                              _showCopyToDialog();
+                              break;
+                          }
+                        },
+                        itemBuilder:
+                            (context) => [
+                              PopupMenuItem(
+                                value: 'new_song',
+                                enabled: _folderPath != null,
+                                child: const Text('Pridať akordy'),
+                              ),
+                              PopupMenuItem(
+                                value: 'new_folder',
+                                enabled: _folderPath != null,
+                                child: const Text('Nový priečinok'),
+                              ),
+                              PopupMenuItem(
+                                value: 'selection',
+                                enabled: _folderPath != null,
+                                child: Text(
+                                  _isSelectionMode
+                                      ? 'Zrušiť výber'
+                                      : 'Vybrať skladby do priečinka',
+                                ),
+                              ),
+                              if (_isSelectionMode)
+                                PopupMenuItem(
+                                  value: 'copy',
+                                  enabled: _selectedForCopy.isNotEmpty,
+                                  child: const Text('Kopírovať do priečinka'),
+                                ),
+                            ],
+                        child: const Padding(
+                          padding: EdgeInsets.all(12),
+                          child: Icon(Icons.more_horiz),
+                        ),
+                      )
+                    else ...[
+                      TextButton.icon(
+                        onPressed:
+                            _folderPath == null ? null : _createNewProSong,
+                        icon: const Icon(Icons.note_add),
+                        label: const Text('Pridať akordy'),
+                      ),
+                      TextButton.icon(
+                        onPressed:
+                            _folderPath == null ? null : _createSubfolder,
+                        icon: const Icon(Icons.create_new_folder),
+                        label: const Text('Nový priečinok'),
+                      ),
+                      TextButton.icon(
+                        onPressed:
+                            _folderPath == null ? null : _toggleSelectionMode,
+                        icon: Icon(
+                          _isSelectionMode ? Icons.close : Icons.checklist,
+                        ),
+                        label: Text(
                           _isSelectionMode
                               ? 'Zrušiť výber'
-                              : 'Vybrať skladby do priečinka',
+                              : 'Vyber skladby do priečinka',
                         ),
                       ),
                       if (_isSelectionMode)
-                        PopupMenuItem(
-                          value: 'copy',
-                          enabled: _selectedForCopy.isNotEmpty,
-                          child: const Text('Kopírovať do priečinka'),
+                        TextButton.icon(
+                          onPressed:
+                              _selectedForCopy.isEmpty
+                                  ? null
+                                  : _showCopyToDialog,
+                          icon: const Icon(Icons.copy),
+                          label: const Text('Kopírovať do priečinka'),
                         ),
                     ],
-                child: const Padding(
-                  padding: EdgeInsets.all(12),
-                  child: Icon(Icons.more_horiz),
-                ),
-              )
-            else ...[
-              TextButton.icon(
-                onPressed: _folderPath == null ? null : _createNewProSong,
-                icon: const Icon(Icons.note_add),
-                label: const Text('Pridať akordy'),
-              ),
-              TextButton.icon(
-                onPressed: _folderPath == null ? null : _createSubfolder,
-                icon: const Icon(Icons.create_new_folder),
-                label: const Text('Nový priečinok'),
-              ),
-              TextButton.icon(
-                onPressed: _folderPath == null ? null : _toggleSelectionMode,
-                icon: Icon(_isSelectionMode ? Icons.close : Icons.checklist),
-                label: Text(
-                  _isSelectionMode
-                      ? 'Zrušiť výber'
-                      : 'Vyber skladby do priečinka',
-                ),
-              ),
-              if (_isSelectionMode)
-                TextButton.icon(
-                  onPressed:
-                      _selectedForCopy.isEmpty ? null : _showCopyToDialog,
-                  icon: const Icon(Icons.copy),
-                  label: const Text('Kopírovať do priečinka'),
-                ),
-            ],
-            IconButton(
-              onPressed:
-                  _folderPath == null
-                      ? null
-                      : (kIsWeb && _needsDriveLogin
-                          ? _reconnectGoogleDrive
-                          : _loadSongs),
-              tooltip: 'Obnoviť zoznam',
-              icon: const Icon(Icons.refresh),
-            ),
-            const SizedBox(width: 8),
-          ],
+                    IconButton(
+                      onPressed:
+                          _folderPath == null
+                              ? null
+                              : (kIsWeb && _needsDriveLogin
+                                  ? _reconnectGoogleDrive
+                                  : _loadSongs),
+                      tooltip: 'Obnoviť zoznam',
+                      icon: const Icon(Icons.refresh),
+                    ),
+                    const SizedBox(width: 8),
+                  ],
         ),
         body: PopScope(
           // Tlačidlo Späť na mobile zavrie detail skladby namiesto opustenia aplikácie.
@@ -2280,35 +2330,35 @@ class _SongbookPageState extends State<SongbookPage> {
             if (!didPop) setState(() => _mobileDetailOpen = false);
           },
           child: Column(
-          children: [
-            if (_isSyncing) const LinearProgressIndicator(minHeight: 2),
-            if (kIsWeb && _needsDriveLogin && _folderPath != null)
-              _buildDriveLoginBanner(),
-            Expanded(
-              child:
-                  _isLoading
-                      ? const Center(child: CircularProgressIndicator())
-                      : _folderPath == null
-                      ? _buildFolderPrompt()
-                      : _showPlaylistBuilder
-                      ? _buildPlaylistBuilderPanel()
-                      : isPhone
-                      ? (showMobileDetail
-                          ? _buildSongDetailsPanel()
-                          : _buildSongListPanel())
-                      : Row(
-                        children: [
-                          SizedBox(
-                            width: isTablet ? 280 : 320,
-                            child: _buildSongListPanel(),
-                          ),
-                          const VerticalDivider(width: 1),
-                          Expanded(child: _buildSongDetailsPanel()),
-                        ],
-                      ),
-            ),
-          ],
-        ),
+            children: [
+              if (_isSyncing) const LinearProgressIndicator(minHeight: 2),
+              if (kIsWeb && _needsDriveLogin && _folderPath != null)
+                _buildDriveLoginBanner(),
+              Expanded(
+                child:
+                    _isLoading
+                        ? const Center(child: CircularProgressIndicator())
+                        : _folderPath == null
+                        ? _buildFolderPrompt()
+                        : _showPlaylistBuilder
+                        ? _buildPlaylistBuilderPanel()
+                        : isPhone
+                        ? (showMobileDetail
+                            ? _buildSongDetailsPanel()
+                            : _buildSongListPanel())
+                        : Row(
+                          children: [
+                            SizedBox(
+                              width: isTablet ? 280 : 320,
+                              child: _buildSongListPanel(),
+                            ),
+                            const VerticalDivider(width: 1),
+                            Expanded(child: _buildSongDetailsPanel()),
+                          ],
+                        ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -2374,7 +2424,9 @@ class _SongbookPageState extends State<SongbookPage> {
                 value: 'selection',
                 enabled: hasFolder,
                 child: Text(
-                  _isSelectionMode ? 'Zrušiť výber' : 'Vybrať skladby do priečinka',
+                  _isSelectionMode
+                      ? 'Zrušiť výber'
+                      : 'Vybrať skladby do priečinka',
                 ),
               ),
               if (_isSelectionMode)
@@ -2384,12 +2436,11 @@ class _SongbookPageState extends State<SongbookPage> {
                   child: const Text('Kopírovať do priečinka'),
                 ),
               const PopupMenuDivider(),
-              PopupMenuItem(
-                value: 'folder',
-                child: Text(
-                  kIsWeb ? 'Priečinok Google Disku' : 'Vybrať priečinok',
+              if (!(_hasFixedFolder && hasFolder))
+                PopupMenuItem(
+                  value: 'folder',
+                  child: Text(_folderActionLabel()),
                 ),
-              ),
               PopupMenuItem(
                 value: 'theme',
                 child: Text(
@@ -2418,15 +2469,21 @@ class _SongbookPageState extends State<SongbookPage> {
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(
-            kIsWeb
-                ? 'Pripoj zdieľaný priečinok Google Disku so skladbami.'
-                : 'Vyber priečinok so skladbami vo formáte .pro',
+            _hasFixedFolder
+                ? 'Prihlás sa do Google účtu, aby sa načítal spevník.'
+                : (kIsWeb
+                    ? 'Pripoj zdieľaný priečinok Google Disku so skladbami.'
+                    : 'Vyber priečinok so skladbami vo formáte .pro'),
           ),
           const SizedBox(height: 16),
           ElevatedButton.icon(
             onPressed: _pickFolder,
-            icon: const Icon(Icons.folder_open),
-            label: Text(kIsWeb ? 'Pripojiť Google Disk' : 'Vybrať priečinok'),
+            icon: Icon(_hasFixedFolder ? Icons.login : Icons.folder_open),
+            label: Text(
+              _hasFixedFolder
+                  ? 'Prihlásiť sa do Google'
+                  : (kIsWeb ? 'Pripojiť Google Disk' : 'Vybrať priečinok'),
+            ),
           ),
         ],
       ),
@@ -2479,107 +2536,108 @@ class _SongbookPageState extends State<SongbookPage> {
                 ),
                 child: SingleChildScrollView(
                   child: Wrap(
-                spacing: 16,
-                runSpacing: 12,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
+                    spacing: 16,
+                    runSpacing: 12,
+                    crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
-                      Text(
-                        'Playlist: $_playlistSourceTitle',
-                        style: Theme.of(context).textTheme.titleMedium,
+                      Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            'Playlist: $_playlistSourceTitle',
+                            style: Theme.of(context).textTheme.titleMedium,
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            _folderPath!,
+                            style: Theme.of(context).textTheme.bodySmall,
+                          ),
+                        ],
                       ),
-                      const SizedBox(height: 4),
+                      const SizedBox(width: 8),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Text('Počet kôl'),
+                          const SizedBox(width: 12),
+                          DropdownButton<int>(
+                            value: _playlistRoundCount,
+                            onChanged: (value) {
+                              if (value != null) {
+                                _setPlaylistRoundCount(value);
+                              }
+                            },
+                            items: [
+                              for (var count = 1; count <= 8; count++)
+                                DropdownMenuItem(
+                                  value: count,
+                                  child: Text('$count'),
+                                ),
+                            ],
+                          ),
+                        ],
+                      ),
+                      FilledButton.icon(
+                        onPressed: _savePlaylistOrderToFolder,
+                        icon: const Icon(Icons.save),
+                        label: const Text('Uložiť poradie do priečinka'),
+                      ),
+                      FilledButton.icon(
+                        onPressed: _exportPlaylistToWord,
+                        icon: const Icon(Icons.description),
+                        label: const Text('Export do Wordu'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          setState(() {
+                            _bootstrapPlaylistBuilder(
+                              _songsForRelativeDir(_playlistSourceRelativeDir),
+                            );
+                          });
+                        },
+                        icon: const Icon(Icons.cleaning_services),
+                        label: const Text('Vrátiť všetko späť'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: _closePlaylistBuilder,
+                        icon: const Icon(Icons.view_list),
+                        label: const Text('Späť na knižnicu'),
+                      ),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          IconButton(
+                            tooltip: 'Posun doľava',
+                            onPressed:
+                                () => _scrollPlaylistHorizontallyBy(-420),
+                            icon: const Icon(Icons.chevron_left),
+                          ),
+                          IconButton(
+                            tooltip: 'Posun doprava',
+                            onPressed: () => _scrollPlaylistHorizontallyBy(420),
+                            icon: const Icon(Icons.chevron_right),
+                          ),
+                        ],
+                      ),
+                      OutlinedButton.icon(
+                        onPressed:
+                            _playlistSelectedPaths.isEmpty
+                                ? null
+                                : _clearPlaylistSelection,
+                        icon: const Icon(Icons.deselect),
+                        label: Text(
+                          _playlistSelectedPaths.isEmpty
+                              ? 'Bez výberu'
+                              : 'Vymazať výber (${_playlistSelectedPaths.length})',
+                        ),
+                      ),
                       Text(
-                        _folderPath!,
+                        'Nezaradené: ${_playlistUnassigned.length}  |  Spolu: ${_songs.length}',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                     ],
                   ),
-                  const SizedBox(width: 8),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const Text('Počet kôl'),
-                      const SizedBox(width: 12),
-                      DropdownButton<int>(
-                        value: _playlistRoundCount,
-                        onChanged: (value) {
-                          if (value != null) {
-                            _setPlaylistRoundCount(value);
-                          }
-                        },
-                        items: [
-                          for (var count = 1; count <= 8; count++)
-                            DropdownMenuItem(
-                              value: count,
-                              child: Text('$count'),
-                            ),
-                        ],
-                      ),
-                    ],
-                  ),
-                  FilledButton.icon(
-                    onPressed: _savePlaylistOrderToFolder,
-                    icon: const Icon(Icons.save),
-                    label: const Text('Uložiť poradie do priečinka'),
-                  ),
-                  FilledButton.icon(
-                    onPressed: _exportPlaylistToWord,
-                    icon: const Icon(Icons.description),
-                    label: const Text('Export do Wordu'),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: () {
-                      setState(() {
-                        _bootstrapPlaylistBuilder(
-                          _songsForRelativeDir(_playlistSourceRelativeDir),
-                        );
-                      });
-                    },
-                    icon: const Icon(Icons.cleaning_services),
-                    label: const Text('Vrátiť všetko späť'),
-                  ),
-                  OutlinedButton.icon(
-                    onPressed: _closePlaylistBuilder,
-                    icon: const Icon(Icons.view_list),
-                    label: const Text('Späť na knižnicu'),
-                  ),
-                  Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      IconButton(
-                        tooltip: 'Posun doľava',
-                        onPressed: () => _scrollPlaylistHorizontallyBy(-420),
-                        icon: const Icon(Icons.chevron_left),
-                      ),
-                      IconButton(
-                        tooltip: 'Posun doprava',
-                        onPressed: () => _scrollPlaylistHorizontallyBy(420),
-                        icon: const Icon(Icons.chevron_right),
-                      ),
-                    ],
-                  ),
-                  OutlinedButton.icon(
-                    onPressed:
-                        _playlistSelectedPaths.isEmpty
-                            ? null
-                            : _clearPlaylistSelection,
-                    icon: const Icon(Icons.deselect),
-                    label: Text(
-                      _playlistSelectedPaths.isEmpty
-                          ? 'Bez výberu'
-                          : 'Vymazať výber (${_playlistSelectedPaths.length})',
-                    ),
-                  ),
-                  Text(
-                    'Nezaradené: ${_playlistUnassigned.length}  |  Spolu: ${_songs.length}',
-                    style: Theme.of(context).textTheme.bodySmall,
-                  ),
-                ],
-              ),
                 ),
               ),
             ),
@@ -2590,9 +2648,13 @@ class _SongbookPageState extends State<SongbookPage> {
               builder: (context, constraints) {
                 final narrow = constraints.maxWidth < 700;
                 final unassignedWidth =
-                    narrow ? math.min(316.0, constraints.maxWidth * 0.85) : 316.0;
+                    narrow
+                        ? math.min(316.0, constraints.maxWidth * 0.85)
+                        : 316.0;
                 final roundWidth =
-                    narrow ? math.min(280.0, constraints.maxWidth * 0.8) : 280.0;
+                    narrow
+                        ? math.min(280.0, constraints.maxWidth * 0.8)
+                        : 280.0;
                 final neededWidth =
                     unassignedWidth +
                     12 +

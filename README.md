@@ -67,3 +67,9 @@ Keď v podpriečinku presunieš skladbu (alebo uložíš poradie z tvorby playli
 - **Počítač**: pôvodné rozloženie.
 - **Fullscreen na mobile a tablete:** otvorí sa dvojklikom na skladbu. Vo fullscreene jedno klepnutie pozastaví alebo znovu spustí scrollovanie. Na mobile sú transpozícia a rýchlosť v paneli pod tlačidlom `tune`.
 
+### Pevne daný priečinok
+
+Odkaz na priečinok so skladbami je v `lib/pages/songbook_page.dart` v konštante `_fixedDriveFolderUrl` (alebo sa zadá cez `--dart-define=DRIVE_FOLDER_URL=...`). Používateľ sa potom len prihlási do Google účtu a odkaz nezadáva. Pri prázdnej konštante sa odkaz pýta ako predtým.
+
+Priečinok sa na Google Disku zdieľa cez **Zdieľať → Všeobecný prístup → Každý, kto má odkaz** (rola *Editor* na úpravy, *Čitateľ* len na prezeranie). Súbory v ňom dedia rovnaké oprávnenie.
+
