@@ -108,6 +108,8 @@ class _SongbookPageState extends State<SongbookPage> {
   bool _isSyncing = false; // obnova na pozadí, zoznam ostáva viditeľný
   bool _needsDriveLogin = false; // vypršalo prihlásenie do Google Disku
   bool _mobileDetailOpen = false; // na mobile: otvorený detail skladby
+  // Kľúč vybranej skladby v zozname, aby sa k nej dalo doscrollovať.
+  final GlobalKey _selectedTileKey = GlobalKey();
   bool _isEditing = false;
   int _transposeSemitones = 0;
   List<String> _subfolders = [];
@@ -166,6 +168,7 @@ class _SongbookPageState extends State<SongbookPage> {
           });
           _editorController.text = selected?.content ?? '';
           restoredFromCache = true;
+          _scrollListToSelected();
         }
 
         // 2) Na pozadí zoznam aktualizuj, ak je prihlásenie ešte platné.
@@ -576,8 +579,30 @@ class _SongbookPageState extends State<SongbookPage> {
   }
 
   void _bootstrapPlaylistBuilder(List<ProSongFile> sourceSongs) {
+    // Skladby s uloženým kolom ("K2-05 - ...") sa vrátia do svojho kola.
+    int? savedRound(ProSongFile song) =>
+        _playlistSourceRelativeDir.isEmpty
+            ? null
+            : SongFileOrder.roundOf(SongRepository.basename(song.path));
+
+    var highestRound = 0;
+    for (final song in sourceSongs) {
+      highestRound = math.max(highestRound, savedRound(song) ?? 0);
+    }
+    if (highestRound > _playlistRoundCount) {
+      _playlistRoundCount = highestRound.clamp(1, 8);
+    }
+
     _playlistColumns = List.generate(_playlistRoundCount, (_) => <String>[]);
-    _playlistUnassigned = sourceSongs.map((song) => song.path).toList();
+    _playlistUnassigned = [];
+    for (final song in sourceSongs) {
+      final round = savedRound(song);
+      if (round != null && round >= 1 && round <= _playlistRoundCount) {
+        _playlistColumns[round - 1].add(song.path);
+      } else {
+        _playlistUnassigned.add(song.path);
+      }
+    }
     _playlistSelectedPaths.clear();
   }
 
@@ -761,8 +786,18 @@ class _SongbookPageState extends State<SongbookPage> {
       });
       await _saveFolderOrder();
     } else {
-      // Podpriečinok: poradie sa uloží do názvov súborov (01 - ..., 02 - ...).
-      await _saveFolderOrderToFiles(relativeDir, orderedSongs);
+      // Podpriečinok: poradie a kolá sa uložia do názvov súborov
+      // (napr. K1-01 - ..., K2-05 - ...). Nezaradené skladby kolo nemajú.
+      final rounds = <String, int?>{};
+      for (var i = 0; i < _playlistColumns.length; i++) {
+        for (final path in _playlistColumns[i]) {
+          rounds[path] = i + 1;
+        }
+      }
+      for (final path in _playlistUnassigned) {
+        rounds[path] = null;
+      }
+      await _saveFolderOrderToFiles(relativeDir, orderedSongs, rounds: rounds);
     }
 
     final folderLabel =
@@ -1078,7 +1113,21 @@ class _SongbookPageState extends State<SongbookPage> {
     final moved = updated.removeAt(oldIndex);
     updated.insert(adjustedNewIndex, moved);
 
-    unawaited(_saveFolderOrderToFiles(relativeDir, updated));
+    // Presunutá skladba prevezme kolo skladby nad sebou (alebo pod sebou,
+    // ak je na začiatku). Ostatné si kolo ponechajú.
+    int? roundOf(ProSongFile song) =>
+        SongFileOrder.roundOf(SongRepository.basename(song.path));
+    Map<String, int?>? rounds;
+    if (updated.any((song) => roundOf(song) != null)) {
+      rounds = {for (final song in updated) song.path: roundOf(song)};
+      final neighbor =
+          adjustedNewIndex > 0
+              ? updated[adjustedNewIndex - 1]
+              : (updated.length > 1 ? updated[1] : null);
+      rounds[moved.path] = neighbor == null ? null : roundOf(neighbor);
+    }
+
+    unawaited(_saveFolderOrderToFiles(relativeDir, updated, rounds: rounds));
   }
 
   String _replaceFileName(String path, String newName) {
@@ -1093,17 +1142,23 @@ class _SongbookPageState extends State<SongbookPage> {
   /// ktorým sa číslo zmenilo. Nové poradie sa zobrazí hneď.
   Future<void> _saveFolderOrderToFiles(
     String relativeDir,
-    List<ProSongFile> ordered,
-  ) async {
+    List<ProSongFile> ordered, {
+    Map<String, int?>? rounds,
+  }) async {
     final width = SongFileOrder.widthFor(ordered.length);
     final renames = <String, String>{}; // pôvodná cesta -> nová cesta
     for (var index = 0; index < ordered.length; index++) {
       final song = ordered[index];
       final currentName = SongRepository.basename(song.path);
+      // Kolo sa ukladá do názvu ("K2-05 - ..."). Bez zadaných kôl ostáva
+      // každej skladbe jej doterajšie kolo.
+      final round =
+          rounds != null ? rounds[song.path] : SongFileOrder.roundOf(currentName);
       final targetName = SongFileOrder.withOrder(
         currentName,
         index + 1,
         width: width,
+        round: round,
       );
       if (targetName != currentName) {
         renames[song.path] = _replaceFileName(song.path, targetName);
@@ -1218,6 +1273,86 @@ class _SongbookPageState extends State<SongbookPage> {
     songs
       ..clear()
       ..addAll(ordered);
+  }
+
+  /// Skladby aktuálneho priečinka v poradí playlistu (tak, ako sú v zozname).
+  List<ProSongFile> _playlistOrderForSelected() {
+    final selected = _selectedSong;
+    if (selected == null) return const [];
+    return _songsForRelativeDir(_relativeDirOf(selected.path));
+  }
+
+  int? _roundOfSong(ProSongFile song) =>
+      _relativeDirOf(song.path).isEmpty
+          ? null
+          : SongFileOrder.roundOf(SongRepository.basename(song.path));
+
+  String _positionLabel(List<ProSongFile> order, int index) {
+    final round = _roundOfSong(order[index]);
+    final position = '${index + 1} / ${order.length}';
+    return round == null ? position : 'Kolo $round · $position';
+  }
+
+  bool _canMoveSong(int delta) {
+    final selected = _selectedSong;
+    if (selected == null) return false;
+    final order = _playlistOrderForSelected();
+    final index = order.indexWhere((song) => song.path == selected.path);
+    final target = index + delta;
+    return index >= 0 && target >= 0 && target < order.length;
+  }
+
+  /// Prepne na predchádzajúcu (-1) alebo nasledujúcu (+1) skladbu v poradí playlistu.
+  ProSongFile? _moveSelectedSong(int delta) {
+    if (_isEditing || !_canMoveSong(delta)) return null;
+    final order = _playlistOrderForSelected();
+    final index = order.indexWhere((song) => song.path == _selectedSong!.path);
+    final target = order[index + delta];
+    _selectSong(target);
+    _scrollListToSelected();
+    return target;
+  }
+
+  /// Dáta pre fullscreen pri prepnutí skladby šípkami.
+  PerformanceSong? _performanceSongAfterMove(int delta) {
+    final song = _moveSelectedSong(delta);
+    if (song == null) return null;
+    final parsed = ParsedSong.fromContent(
+      song.content,
+      fallbackTitle: SongRepository.basenameWithoutExtension(song.path),
+    );
+    final order = _playlistOrderForSelected();
+    final index = order.indexWhere((item) => item.path == song.path);
+    return PerformanceSong(
+      title: parsed.title,
+      subtitle: parsed.subtitle,
+      displayLines: SongDisplayBuilder.build(parsed.lines),
+      scrollSpeed: parsed.scrollSpeed,
+      positionLabel: index >= 0 ? _positionLabel(order, index) : null,
+    );
+  }
+
+  /// Doscrolluje zoznam k vybranej skladbe (po návrate z detailu alebo
+  /// po prepnutí šípkami).
+  void _scrollListToSelected() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final tileContext = _selectedTileKey.currentContext;
+      if (!mounted || tileContext == null) return;
+      // Na mobile je zoznam pri otvorenom detaile skrytý, tam netreba animáciu.
+      final listHidden =
+          MediaQuery.sizeOf(context).width < 700 && _mobileDetailOpen;
+      Scrollable.ensureVisible(
+        tileContext,
+        alignment: 0.35,
+        duration: listHidden ? Duration.zero : const Duration(milliseconds: 250),
+        curve: Curves.easeOut,
+      );
+    });
+  }
+
+  void _closeMobileDetail() {
+    setState(() => _mobileDetailOpen = false);
+    _scrollListToSelected();
   }
 
   void _selectSong(ProSongFile song) {
@@ -2013,6 +2148,15 @@ class _SongbookPageState extends State<SongbookPage> {
     ).showSnackBar(SnackBar(content: Text(message)));
   }
 
+  String? _currentPositionLabel() {
+    final selected = _selectedSong;
+    if (selected == null) return null;
+    final order = _playlistOrderForSelected();
+    final index = order.indexWhere((song) => song.path == selected.path);
+    if (index < 0 || order.length < 2) return null;
+    return _positionLabel(order, index);
+  }
+
   Future<void> _openPerformanceMode(
     ParsedSong parsedSong,
     List<SongDisplayLine> displayLines,
@@ -2027,6 +2171,9 @@ class _SongbookPageState extends State<SongbookPage> {
               initialTransposeSemitones: _transposeSemitones,
               initialScrollSpeedPixelsPerSecond: parsedSong.scrollSpeed,
               onSaveScrollSpeed: _saveScrollSpeedToSong,
+              positionLabel: _currentPositionLabel(),
+              canChangeSong: _canMoveSong,
+              onChangeSong: _performanceSongAfterMove,
             ),
       ),
     );
@@ -2157,7 +2304,7 @@ class _SongbookPageState extends State<SongbookPage> {
           leading:
               showMobileDetail
                   ? IconButton(
-                    onPressed: () => setState(() => _mobileDetailOpen = false),
+                    onPressed: _closeMobileDetail,
                     tooltip: 'Späť na zoznam',
                     icon: const Icon(Icons.arrow_back),
                   )
@@ -2327,7 +2474,7 @@ class _SongbookPageState extends State<SongbookPage> {
           // Tlačidlo Späť na mobile zavrie detail skladby namiesto opustenia aplikácie.
           canPop: !showMobileDetail,
           onPopInvokedWithResult: (didPop, result) {
-            if (!didPop) setState(() => _mobileDetailOpen = false);
+            if (!didPop) _closeMobileDetail();
           },
           child: Column(
             children: [
@@ -2343,9 +2490,18 @@ class _SongbookPageState extends State<SongbookPage> {
                         : _showPlaylistBuilder
                         ? _buildPlaylistBuilderPanel()
                         : isPhone
-                        ? (showMobileDetail
-                            ? _buildSongDetailsPanel()
-                            : _buildSongListPanel())
+                        // Zoznam ostáva v strome (len skrytý), takže po návrate z
+                        // detailu je na rovnakom mieste a s rozbalenými priečinkami.
+                        ? Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            Offstage(
+                              offstage: showMobileDetail,
+                              child: _buildSongListPanel(),
+                            ),
+                            if (showMobileDetail) _buildSongDetailsPanel(),
+                          ],
+                        )
                         : Row(
                           children: [
                             SizedBox(
@@ -3202,7 +3358,11 @@ class _SongbookPageState extends State<SongbookPage> {
       key: ValueKey(
         isFiltering ? 'search_folder_$relativeDir' : 'folder_$relativeDir',
       ),
-      initiallyExpanded: isMainFolder || isFiltering,
+      initiallyExpanded:
+          isMainFolder ||
+          isFiltering ||
+          (_selectedSong != null &&
+              _relativeDirOf(_selectedSong!.path) == relativeDir),
       title: Row(
         children: [
           Expanded(child: Text(title)),
@@ -3306,8 +3466,12 @@ class _SongbookPageState extends State<SongbookPage> {
   }) {
     final isSelected = song.path == _selectedSong?.path;
     final canDelete = relativeDir.isNotEmpty;
-    return ListTile(
-      key: key,
+    // Kolo playlistu (len mimo hlavného priečinka).
+    final round =
+        relativeDir.isEmpty
+            ? null
+            : SongFileOrder.roundOf(SongRepository.basename(song.path));
+    final tile = ListTile(
       leading:
           _isSelectionMode
               ? Checkbox(
@@ -3324,7 +3488,33 @@ class _SongbookPageState extends State<SongbookPage> {
               )
               : null,
       selected: isSelected,
-      title: Text(song.title),
+      title:
+          round == null
+              ? Text(song.title)
+              : Row(
+                children: [
+                  Container(
+                    margin: const EdgeInsets.only(right: 8),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 7,
+                      vertical: 2,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.secondaryContainer,
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Text(
+                      'Kolo $round',
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        fontWeight: FontWeight.w600,
+                        color:
+                            Theme.of(context).colorScheme.onSecondaryContainer,
+                      ),
+                    ),
+                  ),
+                  Expanded(child: Text(song.title)),
+                ],
+              ),
       subtitle:
           song.subtitle == null || song.subtitle!.trim().isEmpty
               ? null
@@ -3374,6 +3564,10 @@ class _SongbookPageState extends State<SongbookPage> {
           _selectSong(song);
         }
       },
+    );
+    return KeyedSubtree(
+      key: key,
+      child: isSelected ? KeyedSubtree(key: _selectedTileKey, child: tile) : tile,
     );
   }
 
@@ -4107,7 +4301,39 @@ class _SongbookPageState extends State<SongbookPage> {
                 : _saveCurrentTransposition;
         final VoidCallback? printAction = _isEditing ? null : _printCurrentSong;
 
+        final navOrder = _playlistOrderForSelected();
+        final navIndex = navOrder.indexWhere(
+          (song) => song.path == selectedSong.path,
+        );
+        final showNav = navOrder.length > 1 && navIndex >= 0;
+        final navControls = Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              onPressed:
+                  _isEditing || navIndex <= 0
+                      ? null
+                      : () => _moveSelectedSong(-1),
+              tooltip: 'Predchádzajúca pieseň',
+              icon: const Icon(Icons.skip_previous),
+            ),
+            Text(
+              showNav ? _positionLabel(navOrder, navIndex) : '',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            IconButton(
+              onPressed:
+                  _isEditing || navIndex >= navOrder.length - 1
+                      ? null
+                      : () => _moveSelectedSong(1),
+              tooltip: 'Nasledujúca pieseň',
+              icon: const Icon(Icons.skip_next),
+            ),
+          ],
+        );
+
         final actions = <Widget>[
+          if (showNav) navControls,
           transposeControls,
           if (compact)
             IconButton(

@@ -1,13 +1,21 @@
 // Poradie skladieb v podpriečinkoch sa ukladá priamo do názvu súboru
 // ako číselná predpona, napr. "01 - Aleluja.pro". Vďaka tomu sa poradie
-// zachová na každom zariadení aj na Google Disku.
+// zachová na každom zariadení aj na Google Disku. Ak je skladba zaradená do
+// kola playlistu, predpona obsahuje aj kolo: "K2-05 - Aleluja.pro".
 class SongFileOrder {
-  static final RegExp _prefix = RegExp(r'^(\d{1,3}) - (?=\S)');
+  static final RegExp _prefix = RegExp(r'^(?:K(\d)-)?(\d{1,3}) - (?=\S)');
 
   /// Číslo z predpony názvu súboru, alebo null, ak súbor predponu nemá.
   static int? orderOf(String fileName) {
     final match = _prefix.firstMatch(fileName);
-    return match == null ? null : int.parse(match.group(1)!);
+    return match == null ? null : int.parse(match.group(2)!);
+  }
+
+  /// Číslo kola z predpony ("K2-05 - X.pro" -> 2), alebo null, ak skladba nie je v kole.
+  static int? roundOf(String fileName) {
+    final match = _prefix.firstMatch(fileName);
+    final round = match?.group(1);
+    return round == null ? null : int.parse(round);
   }
 
   /// Názov bez číselnej predpony ("01 - Aleluja.pro" -> "Aleluja.pro").
@@ -15,9 +23,16 @@ class SongFileOrder {
       fileName.replaceFirst(_prefix, '');
 
   /// Názov s predponou zodpovedajúcou poradiu ("Aleluja.pro" -> "01 - Aleluja.pro").
-  static String withOrder(String fileName, int order, {int width = 2}) {
+  /// S [round] pribudne aj kolo ("K2-01 - Aleluja.pro").
+  static String withOrder(
+    String fileName,
+    int order, {
+    int width = 2,
+    int? round,
+  }) {
     final number = order.toString().padLeft(width, '0');
-    return '$number - ${stripPrefix(fileName)}';
+    final roundPart = round == null ? '' : 'K$round-';
+    return '$roundPart$number - ${stripPrefix(fileName)}';
   }
 
   /// Šírka čísla pre daný počet skladieb (aspoň 2 číslice).

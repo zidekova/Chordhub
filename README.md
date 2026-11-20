@@ -73,3 +73,10 @@ Odkaz na priečinok so skladbami je v `lib/pages/songbook_page.dart` v konštant
 
 Priečinok sa na Google Disku zdieľa cez **Zdieľať → Všeobecný prístup → Každý, kto má odkaz** (rola *Editor* na úpravy, *Čitateľ* len na prezeranie). Súbory v ňom dedia rovnaké oprávnenie.
 
+### Prepínanie skladieb, kolá a návrat do zoznamu
+
+- V detaile skladby (aj vo fullscreene) sú šípky na predchádzajúcu a nasledujúcu skladbu v poradí, v akom sú v zozname (pri podpriečinku v poradí playlistu). Vedľa šípok je poloha, napr. `Kolo 2 · 3 / 12`.
+- Keď v zostavovači playlistu rozdelíš skladby do kôl a uložíš poradie, kolo sa uloží do názvu súboru, napr. `K2-05 - Aleluja.pro` (kolo 2, poradie 5). Pri skladbách v podpriečinkoch sa potom pri názve zobrazí `Kolo 2` a zostavovač playlistu ich pri otvorení vráti do ich kôl. Skladby bez kola majú názov `05 - Aleluja.pro`.
+- Pri ručnom presune skladby v zozname prevezme presunutá skladba kolo skladby nad sebou.
+- Na mobile a tablete sa po návrate z detailu zoznam zobrazí na rovnakom mieste a s rozbalenými priečinkami a pri prepnutí šípkami sa doscrolluje k aktuálnej skladbe.
+

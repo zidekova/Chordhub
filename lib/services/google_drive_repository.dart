@@ -148,9 +148,8 @@ class GoogleDriveRepository {
         final name = item['name'] as String?;
         final itemId = item['id'] as String?;
         if (name == null || itemId == null) continue;
-        final relativePath = relativeFolder.isEmpty
-            ? name
-            : '$relativeFolder/$name';
+        final relativePath =
+            relativeFolder.isEmpty ? name : '$relativeFolder/$name';
 
         if (_isFolder(item)) {
           folders.add(relativePath);
@@ -272,9 +271,10 @@ class GoogleDriveRepository {
         if (md5.isNotEmpty) checksums[path] = md5;
       }
 
-      final folders = (data['folders'] as List<dynamic>? ?? const [])
-          .whereType<String>()
-          .toList();
+      final folders =
+          (data['folders'] as List<dynamic>? ?? const [])
+              .whereType<String>()
+              .toList();
       SongRepository.sortSongs(songs);
 
       _rootItemId = folderId;
@@ -375,12 +375,10 @@ class GoogleDriveRepository {
   Future<void> createSong(String path, String content) async {
     final relativePath = _relative(path);
     final separator = relativePath.lastIndexOf('/');
-    final fileName = separator < 0
-        ? relativePath
-        : relativePath.substring(separator + 1);
-    final relativeParent = separator < 0
-        ? ''
-        : relativePath.substring(0, separator);
+    final fileName =
+        separator < 0 ? relativePath : relativePath.substring(separator + 1);
+    final relativeParent =
+        separator < 0 ? '' : relativePath.substring(0, separator);
     final parentId = await _resolveFolder(relativeParent);
     await _assertNameFree(parentId, fileName);
     await _createFile(parentId, fileName, utf8.encode(content));
@@ -567,9 +565,10 @@ class GoogleDriveRepository {
         }
       }
 
-      itemId = folder != null
-          ? folder['id'] as String
-          : await _createFolderItem(itemId, segment);
+      itemId =
+          folder != null
+              ? folder['id'] as String
+              : await _createFolderItem(itemId, segment);
     }
     return itemId;
   }
@@ -739,16 +738,15 @@ class GoogleDriveRepository {
     }
   }
 
-  Uri _apiUri(String path, [Map<String, String> query = const {}]) =>
-      Uri.parse('$_apiRoot$path')
-          .replace(queryParameters: {'supportsAllDrives': 'true', ...query});
+  Uri _apiUri(String path, [Map<String, String> query = const {}]) => Uri.parse(
+    '$_apiRoot$path',
+  ).replace(queryParameters: {'supportsAllDrives': 'true', ...query});
 
   Uri _uploadUri(String path, [Map<String, String> query = const {}]) =>
-      Uri.parse('$_uploadRoot$path')
-          .replace(queryParameters: {'supportsAllDrives': 'true', ...query});
+      Uri.parse(
+        '$_uploadRoot$path',
+      ).replace(queryParameters: {'supportsAllDrives': 'true', ...query});
 
-  /// Akceptuje odkaz typu https://drive.google.com/drive/folders/<ID>?usp=sharing,
-  /// odkaz s parametrom ?id=<ID>, alebo samotné ID.
   String? _extractFolderId(String input) {
     final value = input.trim();
     if (value.isEmpty) return null;
@@ -783,17 +781,19 @@ class GoogleDriveRepository {
         : normalizedPath.substring(root.length + 1);
   }
 
-  List<String> _pathSegments(String path) => path
-      .replaceAll('\\', '/')
-      .split('/')
-      .where((segment) => segment.isNotEmpty)
-      .toList();
+  List<String> _pathSegments(String path) =>
+      path
+          .replaceAll('\\', '/')
+          .split('/')
+          .where((segment) => segment.isNotEmpty)
+          .toList();
 
-  String _join(String first, String second) => first.isEmpty
-      ? second
-      : second.isEmpty
-      ? first
-      : '$first/$second';
+  String _join(String first, String second) =>
+      first.isEmpty
+          ? second
+          : second.isEmpty
+          ? first
+          : '$first/$second';
 
   String _segment(String value) => Uri.encodeComponent(value);
 

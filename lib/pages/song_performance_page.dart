@@ -9,6 +9,23 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/song.dart';
 import '../widgets/chord_line_view.dart';
 
+/// Dáta skladby, na ktorú sa prepne šípkami vo fullscreene.
+class PerformanceSong {
+  const PerformanceSong({
+    required this.title,
+    required this.subtitle,
+    required this.displayLines,
+    required this.scrollSpeed,
+    this.positionLabel,
+  });
+
+  final String title;
+  final String? subtitle;
+  final List<SongDisplayLine> displayLines;
+  final double scrollSpeed;
+  final String? positionLabel; // napr. "Kolo 2 · 3 / 12"
+}
+
 class SongPerformancePage extends StatefulWidget {
   const SongPerformancePage({
     required this.title,
@@ -17,6 +34,9 @@ class SongPerformancePage extends StatefulWidget {
     required this.initialTransposeSemitones,
     required this.initialScrollSpeedPixelsPerSecond,
     this.onSaveScrollSpeed,
+    this.positionLabel,
+    this.canChangeSong,
+    this.onChangeSong,
     super.key,
   });
 
@@ -29,12 +49,25 @@ class SongPerformancePage extends StatefulWidget {
   /// Uloží aktuálnu rýchlosť scrollovania do piesne. Pri chybe má vyhodiť výnimku.
   final Future<void> Function(double speedPixelsPerSecond)? onSaveScrollSpeed;
 
+  /// Poloha v playliste na zobrazenie v dolnom paneli (napr. "Kolo 2 · 3 / 12").
+  final String? positionLabel;
+
+  /// Či existuje predchádzajúca (-1) / nasledujúca (+1) skladba.
+  final bool Function(int delta)? canChangeSong;
+
+  /// Prepne na predchádzajúcu/nasledujúcu skladbu a vráti jej dáta.
+  final PerformanceSong? Function(int delta)? onChangeSong;
+
   @override
   State<SongPerformancePage> createState() => _SongPerformancePageState();
 }
 
 class _SongPerformancePageState extends State<SongPerformancePage> {
   late int _transposeSemitones = widget.initialTransposeSemitones;
+  late String _title = widget.title;
+  late String? _subtitle = widget.subtitle;
+  late List<SongDisplayLine> _lines = widget.displayLines;
+  late String? _positionLabel = widget.positionLabel;
   final ScrollController _scrollController = ScrollController();
   Timer? _autoScrollTimer;
   late double _scrollSpeedPixelsPerSecond;
@@ -224,6 +257,29 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
     if (_pointers.isEmpty) {
       _userTouching = false;
     }
+  }
+
+  /// Prepne na predchádzajúcu (-1) alebo nasledujúcu (+1) skladbu playlistu.
+  void _changeSong(int delta) {
+    final handler = widget.onChangeSong;
+    if (handler == null) return;
+    final next = handler(delta);
+    if (next == null) return;
+
+    setState(() {
+      _title = next.title;
+      _subtitle = next.subtitle;
+      _lines = next.displayLines;
+      _positionLabel = next.positionLabel;
+      _scrollSpeedPixelsPerSecond = next.scrollSpeed;
+      _transposeSemitones = 0;
+      _isAutoScrolling = true;
+      _autoKey = null; // prepočítaj automatickú veľkosť písma
+    });
+    if (_scrollController.hasClients) {
+      _scrollController.jumpTo(0);
+    }
+    _startAutoScroll();
   }
 
   /// Jedno klepnutie na skladbu pozastaví alebo znovu spustí scrollovanie.
@@ -542,10 +598,10 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(widget.title, maxLines: 1, overflow: TextOverflow.ellipsis),
-            if (widget.subtitle != null)
+            Text(_title, maxLines: 1, overflow: TextOverflow.ellipsis),
+            if (_subtitle != null)
               Text(
-                widget.subtitle!,
+                _subtitle!,
                 style: Theme.of(context).textTheme.bodySmall,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
@@ -636,11 +692,46 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
                   const SizedBox(width: 4),
                 ],
       ),
+      bottomNavigationBar:
+          widget.onChangeSong == null
+              ? null
+              : BottomAppBar(
+                height: 56,
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                child: Row(
+                  children: [
+                    IconButton(
+                      onPressed:
+                          (widget.canChangeSong?.call(-1) ?? false)
+                              ? () => _changeSong(-1)
+                              : null,
+                      tooltip: 'Predchádzajúca pieseň',
+                      icon: const Icon(Icons.skip_previous),
+                    ),
+                    Expanded(
+                      child: Center(
+                        child: Text(
+                          _positionLabel ?? '',
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      onPressed:
+                          (widget.canChangeSong?.call(1) ?? false)
+                              ? () => _changeSong(1)
+                              : null,
+                      tooltip: 'Nasledujúca pieseň',
+                      icon: const Icon(Icons.skip_next),
+                    ),
+                  ],
+                ),
+              ),
       body: LayoutBuilder(
         builder: (context, constraints) {
           final autoScale = _fontScaleForSingleColumn(
             constraints,
-            widget.displayLines,
+            _lines,
           );
           final fontScale = (autoScale * _zoom).clamp(0.3, 6.0).toDouble();
           final sidePadding = constraints.maxWidth < 700 ? 8.0 : 16.0;
@@ -653,9 +744,9 @@ class _SongPerformancePageState extends State<SongPerformancePage> {
             controller: _scrollController,
             physics: _pinching ? const NeverScrollableScrollPhysics() : null,
             padding: EdgeInsets.fromLTRB(sidePadding, 16, sidePadding, 32),
-            itemCount: widget.displayLines.length,
+            itemCount: _lines.length,
             itemBuilder: (context, index) {
-              final line = widget.displayLines[index];
+              final line = _lines[index];
               return ChordLineView(
                 line: line.rawLine,
                 inChorus: line.isChorus,
